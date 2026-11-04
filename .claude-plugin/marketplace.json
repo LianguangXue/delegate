@@ -1,0 +1,1 @@
+{"name":"local-delegation","description":"Locally maintained optional delegation tools","owner":{"name":"Local workspace"},"plugins":[{"name":"delegate","source":"./plugins/delegate","description":"Optional, session-scoped multi-provider delegation with per-task model and effort."}]}
