@@ -17,8 +17,10 @@ import optimizer
 import rewake
 import delivery
 import handoff
+import inspection
 
 TOOL_FUNCTIONS = {
+  "delegate_inspect": inspection.inspect,
   "delegate_handoff": handoff.link,
   "delegate_control": service.control,
   "delegate_catalog": service.catalog,
@@ -31,6 +33,7 @@ TOOL_FUNCTIONS = {
   "delegate_plan": optimizer.plan,
 }
 DESCRIPTIONS = {
+  "delegate_inspect": "Check handoff workspace/liveness and evidence freshness; checkpoint explicit code/data files after validation; metrics shows real model/effort outcomes. Never grants lease takeover.",
   "delegate_handoff": "Bind to an existing am task, record next step, sync or report a structured cross-agent handoff. Never claims a lease or marks am tasks done. Actions: bind/next/sync/report.",
   "delegate_task": "Begin/update/finish/report an end-to-end task or compare accepted complete cases. "
     "Task accounting includes parent, native subagents and plugin jobs; finish needs evidence. "
@@ -248,7 +251,7 @@ def mcp() -> None:
         raise ValueError("JSON-RPC params must be an object")
       if method == "initialize":
         result = {"protocolVersion": params.get("protocolVersion", "2024-11-05"),
-                  "capabilities": {"tools": {}}, "serverInfo": {"name": "delegate", "version": "0.6.0"}}
+                  "capabilities": {"tools": {}}, "serverInfo": {"name": "delegate", "version": "0.7.1"}}
       elif method == "ping":
         result = {}
       elif method == "tools/list":

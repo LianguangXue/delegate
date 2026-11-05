@@ -68,6 +68,16 @@ def work_state(task: dict[str, Any], work_item: str) -> dict[str, Any] | None:
   if running:
     return {"action": "wait", "job_ids": running, "reason": "This work item already has running work"}
   accepted = [j for j in jobs if j.get("review") == "accepted"]
+  if accepted and not accepted[-1].get("evidence_checkpoint"):
+    return {"action": "replan", "reason": "Accepted result lacks an evidence checkpoint; revalidate before reuse"}
+  if accepted and accepted[-1].get("evidence_checkpoint"):
+    import inspection
+    try:
+      check = inspection.inspect(accepted[-1]["session_id"], job_id=accepted[-1]["id"])
+    except (ValueError, OSError) as exc:
+      return {"action": "replan", "reason": "Evidence inspection unavailable: " + str(exc)}
+    if check["blockers"]:
+      return {"action": "replan", "reason": "; ".join(check["blockers"])}
   if accepted:
     return {"action": "reuse", "job_id": accepted[-1]["id"], "reason": "Reuse validated output instead of repeating it"}
   if len(jobs) >= task["max_attempts"]:

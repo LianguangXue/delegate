@@ -112,3 +112,22 @@ Optional am integration tests use a sibling `am` checkout, or `AM_TEST_BINARY` p
 to its executable. They are explicitly skipped when am is unavailable. Tests use
 throwaway state and no model inference. Host UI wake behavior and provider inference
 require separate live validation. Local machine validation reports are not published.
+
+## Task-scoped handoff and evidence checks (0.7.1)
+
+`delegate_handoff` now accepts `delegate_task_id` and optional `work_item`. A single
+Claude session can link different task scopes to different am tasks. Legacy whole-
+session links remain supported but cannot coexist with task links. Overlapping scopes
+are refused. Scoped next steps, snapshot versions and source IDs stay separate.
+
+`delegate_inspect` supports `check`, `checkpoint` and `metrics`. Check reports current
+workspace/evidence and registered sibling liveness blockers, without taking leases.
+Checkpoint fingerprints explicit bounded regular files and Git HEAD; it resets review
+to pending, so validate before marking accepted. Automatic reuse requires an unchanged
+checkpoint. Unknown/changed dependencies need revalidation. This is a point-in-time,
+named-evidence check, not a transactional write lock across the whole workspace.
+
+Metrics report actual worker attempts, reviewed acceptance, failures, durations and
+usage gaps by task category/model/effort. They do not measure causal model superiority
+or billed savings; parent overhead is in the task ledger. am 0.3.0 task cards show
+running, uncollected, awaiting-review, accepted, needs-work and conflicting summaries.

@@ -251,7 +251,7 @@ class PlannerTests(unittest.TestCase):
     job = {"id": "old", "status": "completed", "review": "accepted", "work_item": "main"}
     st.write("job-old.json", job)
     task = ac.load(self.task["id"]); task["jobs"] = ["old"]; ac.save(task)
-    self.assertEqual(opt.work_state(task, "main")["action"], "reuse")
+    self.assertEqual(opt.work_state(task, "main")["action"], "replan")
     job["review"] = "needs-work"; st.write("job-old.json", job)
     task["max_attempts"] = 1
     self.assertEqual(opt.work_state(task, "main")["action"], "replan")

@@ -376,7 +376,7 @@ class DelegationTests(unittest.TestCase):
     responses = [json.loads(line) for line in process.stdout.splitlines()]
     self.assertEqual(len(responses), 4)
     self.assertEqual(responses[-1]["id"], 2)
-    self.assertEqual(len(responses[-1]["result"]["tools"]), 10)
+    self.assertEqual(len(responses[-1]["result"]["tools"]), 11)
     self.spawn.start()
 
 

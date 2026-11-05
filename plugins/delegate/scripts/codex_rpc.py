@@ -35,7 +35,7 @@ class CodexRPC:
       if on_spawn:
         on_spawn(self.proc.pid)
       os.set_blocking(self.proc.stdin.fileno(), False)
-      self.call("initialize", {"clientInfo": {"name": "claude_delegate", "version": "0.6.0"}})
+      self.call("initialize", {"clientInfo": {"name": "claude_delegate", "version": "0.7.1"}})
       self.send({"method": "initialized", "params": {}})
     except BaseException:
       self.close()

@@ -121,3 +121,28 @@ Do not fabricate baseline runs, silently exclude costs, or promise mathematicall
 Write jobs use retained clean Git worktrees. Review integration; never auto-merge/commit/delete user changes.
 Codex and Claude/DeepSeek worker conversations archive automatically; pending cleanup is not success. Explicit resume restores the
 same thread and completion rearchives it. Job results remain available. A background completion hook can wake an idle interactive Claude session. The Stop hook also reminds Claude to collect required results. A closed session or terminated `claude -p` cannot be woken; results remain available on resume.
+
+## Task scopes and verified handoff (0.7.1)
+
+Prefer delegate_handoff bind with delegate_task_id (and optionally work_item) to link
+individual tasks in one Claude session to different am tasks. Use the same scope for
+next/report/sync. Legacy session-wide bindings still work but cannot coexist with scoped
+bindings; start a fresh session to adopt scoped linking. Overlapping scopes are rejected.
+
+Before handing work over call delegate_inspect(check, job_id). It checks the current
+workspace, registered sibling execution and explicitly checkpointed files. This is a
+point-in-time observation, not permission to steal an am lease or a whole-project proof.
+After testing, call delegate_inspect(checkpoint, job_id, files=[relevant source/data/test
+report paths]); this resets review to pending. Then validate and record accepted with
+actual evidence. Changed or missing evidence/HEAD blocks automatic reuse. Old accepted
+results without checkpoints must be revalidated before automatic reuse.
+
+Use delegate_inspect(action="metrics") for observed per-category/model/effort outcomes,
+wall-clock duration and missing usage. These worker metrics exclude parent overhead;
+use task reports for total costs. Do not claim universal model rankings from sparse or
+unmatched samples. Never hash entire data trees; nominate at most 16 regular files,
+at most 16 MiB each, within the workspace. Broader dependency validity is unknown.
+
+Commands: `metrics` calls delegate_inspect(metrics); `inspect <job-id>` calls check;
+`checkpoint <job-id> <files>` calls checkpoint, followed by actual validation and review.
+Use `link <am-id> task <delegate-task-id>` (optionally `work-item <id>`) for scoped binding.
