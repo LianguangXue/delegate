@@ -271,9 +271,14 @@ def report(task: dict[str, Any]) -> dict[str, Any]:
     issues.append("jobs still active")
   by_model = {name: totals(rows) for name, rows in groups.items()}
   parent = totals([r["usage"] for r in task["requests"].values() if r["source"] == "parent"])
+  native_parent = st.session(task["session_id"]).get("host_kind") in {"codex", "dsh"}
+  if native_parent:
+    parent = None
   return {k: task[k] for k in ("id", "session_id", "label", "category", "complexity", "case_key", "arm",
                                "status", "verdict", "evidence", "token_budget", "max_attempts")} | {
-    "parent": parent, "by_provider_model": by_model,
+    "parent": parent, "parent_metering": "unavailable" if native_parent else "transcript",
+    "total_scope": "observed worker usage; native parent excluded" if native_parent else "observed parent and worker usage",
+    "by_provider_model": by_model,
     "total": totals([r for rows in groups.values() for r in rows]), "jobs": children,
     "elapsed_seconds": round(task.get("finished_at", time.time()) - task["created_at"], 3),
     "measurement_complete": not issues and task["status"] == "closed", "issues": sorted(set(issues)),
@@ -324,6 +329,7 @@ def task_tool(session_id: str, action: str = "report", task_id: str = "", label:
   if not task_id:
     raise ValueError("No active task; specify task_id or begin one")
   with st.locked():
+    state = st.session(session_id)
     task = load(task_id)
     if task["session_id"] != session_id:
       raise ValueError("Task belongs to another session")
@@ -354,7 +360,14 @@ def task_tool(session_id: str, action: str = "report", task_id: str = "", label:
           st.write("job-" + job_id + ".json", job)
       task.update(verdict=verdict, evidence=evidence[:4000])
       if task["status"] != "closed":
-        task["status"] = "closing"  # Stop hook includes the parent's final response.
+        if state.get("host_kind") in {"codex", "dsh"}:
+          task.update(status="closed", finished_at=time.time())
+          task["issues"].append("Native parent usage/final response not metered by this adapter")
+          if state.get("active_task") == task["id"]:
+            state.pop("active_task", None)
+            st.save_session(session_id, state)
+        else:
+          task["status"] = "closing"  # Stop hook includes the parent's final response.
     elif action != "report":
       raise ValueError("Unknown task action")
     save(task)

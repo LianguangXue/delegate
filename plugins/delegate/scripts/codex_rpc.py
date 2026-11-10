@@ -9,19 +9,34 @@ import select
 import subprocess
 import threading
 import time
+import tomllib
+from pathlib import Path
 from lifecycle import identity, stop_owned
 
 
 class CodexRPC:
   """Own one stdio app-server and close it without touching other sessions."""
 
-  def __init__(self, command: str = "codex", on_spawn: Callable[[int], None] | None = None) -> None:
+  def __init__(self, command: str = "codex", on_spawn: Callable[[int], None] | None = None, deadline: float | Callable[[], float] | None = None,
+               cancelled: Callable[[], bool] | None = None) -> None:
+    self.deadline = deadline
+    self.cancelled = cancelled
     env = dict(os.environ)
+    env["DELEGATE_WORKER"] = "1"
     # A ChatGPT-backed Codex worker must never fall back to a paid API key.
     env.pop("OPENAI_API_KEY", None)
+    argv = [command, "app-server", "--stdio", "-c", 'model_provider="openai"',
+            "-c", 'forced_login_method="chatgpt"']
+    config = Path(env.get("CODEX_HOME", str(Path.home()/".codex"))) / "config.toml"
+    try:
+      with config.open('rb') as stream:
+        configured = tomllib.load(stream)
+      if "delegate" in configured.get("mcp_servers", {}):
+        argv += ["-c", "mcp_servers.delegate.enabled=false"]
+    except FileNotFoundError:
+      pass
     self.proc = subprocess.Popen(
-      [command, "app-server", "--stdio", "-c", 'model_provider="openai"',
-       "-c", 'forced_login_method="chatgpt"'],
+      argv,
       stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
       text=True, env=env, start_new_session=True,
     )
@@ -35,7 +50,7 @@ class CodexRPC:
       if on_spawn:
         on_spawn(self.proc.pid)
       os.set_blocking(self.proc.stdin.fileno(), False)
-      self.call("initialize", {"clientInfo": {"name": "claude_delegate", "version": "0.7.1"}})
+      self.call("initialize", {"clientInfo": {"name": "claude_delegate", "version": "0.12.0"}})
       self.send({"method": "initialized", "params": {}})
     except BaseException:
       self.close()
@@ -51,15 +66,24 @@ class CodexRPC:
     finally:
       self.messages.put(None)
 
+  def budget_deadline(self) -> float:
+    """Read a dynamic task budget while keeping individual RPC waits bounded."""
+    value = self.deadline() if callable(self.deadline) else self.deadline
+    return value if value is not None else float("inf")
+
   def send(self, value: dict[str, Any]) -> None:
     """Write one JSON-RPC message."""
     data = (json.dumps(value) + "\n").encode()
     fd = self.proc.stdin.fileno()
     deadline = time.monotonic() + 10
     while data:
-      remaining = deadline - time.monotonic()
-      if remaining <= 0 or not select.select([], [fd], [], remaining)[1]:
+      if self.cancelled and self.cancelled():
+        raise InterruptedError("Codex input cancelled")
+      remaining = min(deadline, self.budget_deadline()) - time.monotonic()
+      if remaining <= 0:
         raise TimeoutError("Codex input pipe timed out")
+      if not select.select([], [fd], [], min(1, remaining))[1]:
+        continue
       try:
         data = data[os.write(fd, data):]
       except BlockingIOError:
@@ -79,15 +103,26 @@ class CodexRPC:
 
   def call(self, method: str, params: dict[str, Any] | None = None, timeout: float = 30) -> Any:
     """Wait for one response while buffering other messages in order."""
+    deadline = time.monotonic() + timeout
+    request_deadline = deadline
+    deadline = min(request_deadline, self.budget_deadline())
+    if deadline <= time.monotonic():
+      raise TimeoutError("Task deadline reached before " + method)
+    if self.cancelled and self.cancelled():
+      raise InterruptedError("Codex request cancelled before " + method)
     self.serial += 1
     request_id = self.serial
     self.send({"id": request_id, "method": method, "params": params or {}})
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-      try:
-        value = self.messages.get(timeout=max(0.01, deadline - time.monotonic()))
-      except queue.Empty:
+    while True:
+      deadline = min(request_deadline, self.budget_deadline())
+      if time.monotonic() >= deadline:
         break
+      if self.cancelled and self.cancelled():
+        raise InterruptedError("Codex request cancelled during " + method)
+      try:
+        value = self.messages.get(timeout=min(1, max(0.01, deadline - time.monotonic())))
+      except queue.Empty:
+        continue
       if value is None:
         raise RuntimeError("Codex disconnected during " + method)
       if value.get("id") == request_id and "method" not in value:

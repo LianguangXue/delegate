@@ -196,6 +196,12 @@ class PlannerTests(unittest.TestCase):
   def tearDown(self) -> None:
     self.quota.stop(); self.catalog.stop(); self.env.stop(); self.temp.cleanup()
 
+  def test_fable_family_is_frontier_without_enabling_account_access(self) -> None:
+    before=st.config()
+    self.assertEqual(opt.tier("claude-fable-5-2"),2)
+    self.assertEqual(opt.tier("fable","fast and affordable"),2)
+    self.assertEqual(st.config(),before)
+
   def test_trivial_work_stays_in_main_without_catalog_or_quota_calls(self) -> None:
     ac.task_tool("s", "update", complexity="trivial")
     self.assertEqual(opt.plan("s")["action"], "main")

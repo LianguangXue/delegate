@@ -1,7 +1,17 @@
-# Delegate for Claude Code
+# Delegate — Claude Code, Codex and DeepSeek Harness
 
-An opt-in Claude Code plugin for delegating bounded tasks to Codex, Claude CLI,
-and configured Anthropic-compatible providers, including DeepSeek. Version 0.6.0.
+A shared delegation engine for Claude Code, Codex and DeepSeek Harness, with
+per-task model/effort, durable results and configured Claude/Codex/API workers.
+Version 0.12.0. Activation is configurable; new installations default off.
+
+## Quick start / 快速开始
+
+[中文完整安装手册](docs/INSTALL.zh-CN.md) · [Supported surfaces and limitations](docs/CAPABILITIES.md) · [Release notes](docs/CHANGELOG.md)
+
+Choose one parent host. Authenticate and verify at least one worker backend first.
+Codex/DSH users clone this repository and run `python3 scripts/install-hosts.py codex`
+or `dsh --dsh-profile web` after initializing that profile. The full guide explains
+account setup, activation, first-task verification, optional am and safe upgrades.
 
 ## Install
 
@@ -11,8 +21,8 @@ claude plugin install delegate@local-delegation --scope user
 ```
 
 Restart Claude Code after upgrades so its MCP server and hooks use the same version.
-New sessions start with delegation off. Role definitions persist; activation is
-session-scoped. Native Claude agents remain available independently.
+New sessions inherit configured `default_mode` (built-in fallback: off).
+Explicit session on/off/manual overrides that preference. Role definitions persist. Native Claude agents remain available independently.
 
 ```text
 /delegate on
@@ -52,7 +62,7 @@ Claude-native workers consume Claude quota; API providers use their configured
 credentials. Parent coordination still consumes parent capacity.
 
 Write roles require a clean Git source and isolated worktrees, retained for review.
-Nothing automatically merges or publishes changes. Claude/API workers use restricted
+Nothing automatically merges or publishes changes. Local worktree commits can be explicitly authorized per attempt. Claude/API workers use restricted
 file tools; parent-owned tests may be needed when shell access is required.
 
 Completed Codex and Claude/API conversations are archived recoverably. Explicit
@@ -131,3 +141,135 @@ Metrics report actual worker attempts, reviewed acceptance, failures, durations 
 usage gaps by task category/model/effort. They do not measure causal model superiority
 or billed savings; parent overhead is in the task ledger. am 0.3.0 task cards show
 running, uncollected, awaiting-review, accepted, needs-work and conflicting summaries.
+
+## Codex startup reliability (0.7.2)
+
+Worker startup no longer depends on the cosmetic thread/name/set RPC. Thread source
+metadata still records ownership. Thread start/resume and turn start allow up to 120
+seconds within the task deadline; initialize/account/restore RPCs share that deadline,
+and cancellation interrupts RPC waiting. Expired requests are not sent and mutating
+requests are never automatically replayed. Cleanup may take additional bounded time.
+
+Oversized inherited instruction files are referenced for mandatory bounded file-tool
+reading instead of rejecting the job; duplicate canonical instruction paths are read
+once. Inability to read required instructions must be reported as blocked. A provider
+serverOverloaded response records a separate 60-second per-model cooldown, consulted
+by dispatch and planning even after account quota refresh. It is not quota exhaustion
+and does not automatically switch accounts or replay partially executed work.
+
+## Quota-first collaboration (0.8.0; am 0.4.0)
+
+`delegate_exchange` adapts the local `am work` protocol. Search/get saved artifacts
+before requesting new inference; publish bounded summaries and versioned evidence
+references instead of full conversations. This tool invokes no models. Explicit
+completion manifests support background program waits with host-native completion
+notifications; stage receipts support dependency/freshness checks without rerunning
+side effects. Neither registry schedules jobs or takes leases.
+
+Questions default off. Explicit configure enables one new question per am task,
+with one recipient, <=2000-character question/reply and no forwarding. Messages
+stay queued until explicitly read/answered or delivered through an authorized host
+channel. Enqueueing never automatically resumes a long conversation or starts an
+agent. Sender identity is bound to the MCP session. Limits apply to this protocol's
+requests, not arbitrary native messages or in-flight model usage. See the bundled
+skill and [am](https://github.com/LianguangXue/am) documentation for payload schemas.
+
+This release adds mechanisms for reuse and measurement, not a claim of measured
+subscription savings. Keep per-provider usage, quality, parent overhead and failed
+attempts in comparisons. Restart Claude to load the new MCP tool.
+
+## Optional local commits (0.9.0)
+
+A builder can return a local commit by setting allow_commit=true, commit_message and
+commit_paths on delegate_run. Permission defaults false and must be explicit on each
+resume. Only isolated write worktrees are supported. The model edits/checks files;
+the runtime commits only approved literal paths after successful backend termination.
+Claude/API workers retain their file-only tool restrictions. Read-only roles reject
+commit authorization. Receipt git_commit contains the hash, actual files and worktree;
+parent acceptance is still required.
+
+Example tool fields: allow_commit=true, commit_message="Fix cache invalidation",
+commit_paths=["src/cache.py", "tests/test_cache.py"]. No source checkout commit,
+push, merge, amend or reset is requested by the runtime. Dirty starting worktrees,
+unexpected staging/HEAD changes and escaping paths fail safely. Git subprocess
+identities participate in normal crash recovery. User Git hooks and signing settings
+are respected; failures preserve work for inspection instead of discarding it.
+
+## Optional unbounded runtime (0.10.0)
+
+Explicit timeout_seconds=0 disables the job's total wall-clock limit. Ordinary tasks
+retain the existing finite default. Per-control RPC timeouts, user cancellation,
+provider/account limits and cleanup protections remain in effect. No active legacy
+worker is silently migrated or terminated by an upgrade.
+
+`delegate_job` action `runtime` reports elapsed time, process identities, heartbeat
+and separate progress age/phase. On supported active workers, pass timeout_seconds
+again to change the total limit from the original start (0 removes it). Cancellation
+or archival already underway cannot be reversed. Old workers reject live changes.
+Worker monitoring is code-only; lack of intermediate output is not proof of a stall.
+Unbounded runtime is not an in-flight token or monetary cap.
+
+Host completion observation has a 7-day timeout, independent of job execution.
+After the watcher expires, a runtime/result query can establish another one; an
+existing watcher is deduplicated, not renewed in place. Closed hosts cannot receive
+wakes, while durable job records/notices remain available. Restart Claude to load
+the new long-lived MCP implementation. Defaults and unrelated running jobs remain
+unchanged until explicitly configured.
+
+## Default availability (0.11.0)
+
+On explicit user request, `delegate_configure(section="defaults",
+value={"default_mode":"auto"})` makes fresh sessions directly use configured
+automatic roles without a separate on command. `off` and `manual` are also valid
+new-session defaults. Existing saved session modes remain unchanged. `/delegate off`
+always disables automatic dispatch for that session without cancelling its workers.
+The skill supports automatic model invocation so Claude can load its workflow itself.
+Tiny tasks still stay in main, and automatic mode grants neither commit permission,
+manual-only accounts, cross-session question budget nor remote publication authority.
+
+## Model and workflow recipes
+
+See the [Chinese Claude Code + delegate playbook](plugins/delegate/skills/delegate/references/model-playbook.md)
+for evidence-first model/effort selection, a native read-only helper template, scoped
+fixes, numerical/concurrency reviews, long jobs, batch work and matched evaluation.
+It references the 2026-11-09 claude.dev article plus official model/effort/subagent
+docs. It does not change your main model, enable usage credits or widen allowlists.
+
+## Codex and DeepSeek Harness parent hosts (0.12.0)
+
+Run `python3 scripts/install-hosts.py codex|dsh|all` for a first-time local install.
+The installer adds a Codex stdio MCP entry, host-specific skills and/or a DSH MCP row
+in the selected existing web profile (`--dsh-profile NAME`). It backs up existing
+configuration, checks Codex non-delegate settings are unchanged and never stores keys.
+Existing entries with the same names are refused for manual inspection. It creates
+`~/.local/bin/delegate-agent` pointing to this checkout, so keep the checkout available.
+Codex tools allow 180 seconds; normal result waits remain at most 50 seconds. The DSH
+MCP entry explicitly references native Codex/Claude configuration homes so isolated
+Harness launches do not accidentally search an empty HOME. No sandbox is disabled.
+Other isolated profiles need the same MCP row/explicit homes in their own overlay.
+
+Restart Codex or reload/restart the DSH profile, then open a new conversation. Say
+“use delegate to assign a bounded task to another model”. The host calls delegate_host
+once, retains its returned logical session_id, then uses the existing delegate tools.
+Supply the actual native session ID if available; otherwise retain the generated ID.
+Using the same ID on reconnection recovers ownership. IDs separate logical host/task
+namespaces, not security against another process using the same OS account.
+
+Codex can delegate to configured Claude/DeepSeek/Codex roles; DSH can delegate to
+configured Codex/Claude/API roles. All model/effort allowlists, reserves, manual-only
+accounts and explicit commit requirements remain enforced. `preserve-parent` excludes
+the declared parent provider when conserving its capacity. Unknown DSH account mapping
+must stay unknown, not borrow Claude quota. Native-parent token metering is unavailable;
+task finish closes the logical task but measurement_complete remains false. Worker
+usage is reported separately and does not establish whole-task savings.
+
+Delegate workers cannot recursively use the host adapter. Codex app-server workers
+mark their environment and disable the delegate MCP entry only when that table exists.
+Claude/API workers retain strict MCP restrictions. Other user MCP servers are unchanged.
+
+These hosts have no Claude Stop/asyncRewake hooks. Collect results with delegate_job;
+for code-only background waiting use `delegate-agent wait codex` or `wait dsh` and JSON
+stdin `{ "session_id": "...", "job_id": "..." }` through a host background-command
+facility. A host-native completion notification is only available if that host supports
+it. Closed or unsupported idle hosts are not promised an automatic wake. Results,
+conversation resume, archival, commits and am handoffs remain durable and inspectable.

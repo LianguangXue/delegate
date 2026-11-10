@@ -15,6 +15,8 @@ EFFORTS = ["low", "medium", "high", "xhigh", "max", "ultra"]
 def tier(model: str, description: str = "") -> int:
   """Classify known model families for bootstrap selection, not as measured quality ratings."""
   name = (model + " " + description).lower()
+  if "fable" in model.lower():
+    return 2
   if any(word in name for word in ("luna", "haiku", "flash", "mini", "fast and affordable")):
     return 0
   if any(word in name for word in ("astra", "opus", "-pro", "frontier")):
@@ -132,10 +134,23 @@ def plan(session_id: str, work_item: str = "main", operation: str = "read",
     return {"action": "main", "reason": "Avoid worker startup and handoff overhead for trivial work",
             "estimate_source": "bootstrap heuristic, not a measured saving"}
   cfg = st.config()
-  if refresh:
+  if refresh and state.get("host_kind", "claude") == "claude":
     service.quota("claude", refresh=True, session_id=session_id)
-  main_pressure = pressure(budget.read_claude(session_id), "claude")
-  routing = budget.recommendation(session_id)
+  host = state.get("host_kind", "claude")
+  parent_provider = state.get("parent_provider") if host != "claude" else "claude"
+  if host == "claude":
+    parent_sample = budget.read_claude(session_id)
+    routing = budget.recommendation(session_id)
+  elif parent_provider:
+    parent_sample = service.quota(parent_provider, refresh=refresh, session_id=session_id)
+    parent_quota_kind = "codex" if cfg["providers"][parent_provider]["kind"] == "codex" else "claude"
+    parent_remaining = budget.remaining(parent_sample, parent_quota_kind)
+    routing = {"mode":"handoff" if parent_remaining is not None and parent_remaining <= 5 else "normal"}
+  else:
+    parent_sample = {"status":"unknown"}
+    routing = {"mode":"normal"}
+  parent_quota_kind = "codex" if parent_provider and cfg["providers"][parent_provider]["kind"] == "codex" else "claude"
+  main_pressure = pressure(parent_sample, parent_quota_kind)
   candidates, errors, catalogs, quotas, pressures = [], {}, {}, {}, {}
   desired_tier = {"simple": 0, "standard": 1, "complex": 2}[task["complexity"]]
   desired_effort = {"simple": "low", "standard": "medium", "complex": "high"}[task["complexity"]]
@@ -152,9 +167,13 @@ def plan(session_id: str, work_item: str = "main", operation: str = "read",
       continue
     if state["agents"] is not None and name not in state["agents"]:
       continue
+    if state["strategy"] == "preserve-parent" and parent_provider and provider_name == parent_provider:
+      continue
+    if state["strategy"] == "preserve-claude" and provider["kind"] == "claude":
+      continue
     if (operation == "write") != (role["workspace"] == "worktree"):
       continue
-    if provider["kind"] == "claude" and routing["mode"] in {"external-preferred", "handoff"}:
+    if provider_name == parent_provider and routing["mode"] in {"external-preferred", "handoff"}:
       continue
     try:
       if provider_name not in catalogs:
@@ -172,6 +191,8 @@ def plan(session_id: str, work_item: str = "main", operation: str = "read",
       for row in rows:
         model = row.get("model", row.get("id"))
         if role.get("models") is not None and model not in role["models"]:
+          continue
+        if service.model_cooldown(provider_name, model):
           continue
         if quota.get("status") == "limited" and quota.get("model") == model:
           continue
@@ -208,13 +229,13 @@ def plan(session_id: str, work_item: str = "main", operation: str = "read",
     except Exception as exc:
       errors[provider_name] = str(exc)
   parent_models = [r["model"] for r in task["requests"].values() if r["source"] == "parent"]
-  parent_model = parent_models[-1] if parent_models else None
+  parent_model = parent_models[-1] if parent_models else state.get("parent_model") or None
   parent_tier = tier(parent_model) if parent_model else None
   main = {"action": "main", "model": parent_model, "capability_tier": parent_tier,
           "expected_processed_tokens": main_tokens, "estimate_source": main_source,
-          "quota": main_pressure, "funding": "subscription"}
+          "quota": main_pressure, "funding": "subscription" if parent_provider in {"codex", "claude"} else "parent cost unknown"}
   remaining = main_pressure["remaining_percent"]
-  reserve_main = (state["strategy"] == "preserve-claude" or routing["mode"] == "handoff"
+  reserve_main = ((state["strategy"] == "preserve-parent" or (state["strategy"] == "preserve-claude" and parent_provider == "claude")) or routing["mode"] == "handoff"
                   or (remaining is not None and remaining <= 20 and main_tokens > 3000))
   # The parent transcript does not expose its effort. Do not assume a frontier
   # parent is already using the high reasoning required by complex work.

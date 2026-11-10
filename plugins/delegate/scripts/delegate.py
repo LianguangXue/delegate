@@ -18,8 +18,12 @@ import rewake
 import delivery
 import handoff
 import inspection
+import hosts
+import exchange
 
 TOOL_FUNCTIONS = {
+  "delegate_host": hosts.connect,
+  "delegate_exchange": exchange.exchange,
   "delegate_inspect": inspection.inspect,
   "delegate_handoff": handoff.link,
   "delegate_control": service.control,
@@ -33,6 +37,8 @@ TOOL_FUNCTIONS = {
   "delegate_plan": optimizer.plan,
 }
 DESCRIPTIONS = {
+  "delegate_host": "Codex/DSH bootstrap: register this conversation once and use returned session_id for all tools. Pass actual native session ID when known; otherwise retain the generated ID. Parent provider/model optional; unknown usage stays unknown. Not for delegated workers.",
+  "delegate_exchange": "Quota-first am work protocol: publish/search/get artifacts; watch/poll/ack explicit completion manifests; stage/stage-check evidence; configure/ask/inbox/reply bounded questions. payload is structured data. Never launches or messages another model. project scope required for artifact reads. Questions default disabled, one per am task, no forwarding; recipient must explicitly read/answer.",
   "delegate_inspect": "Check handoff workspace/liveness and evidence freshness; checkpoint explicit code/data files after validation; metrics shows real model/effort outcomes. Never grants lease takeover.",
   "delegate_handoff": "Bind to an existing am task, record next step, sync or report a structured cross-agent handoff. Never claims a lease or marks am tasks done. Actions: bind/next/sync/report.",
   "delegate_task": "Begin/update/finish/report an end-to-end task or compare accepted complete cases. "
@@ -49,8 +55,8 @@ DESCRIPTIONS = {
     "Unknown Claude quota defaults to conserving main capacity in auto mode; off/manual remain unchanged. "
     "Low quota means delegate whole independent stages to allowed external agents, not just reviews. "
     "Native Claude subagents consume the same Claude quota. Model and effort remain per-task choices.",
-  "delegate_control": "Read or change THIS session's optional delegation. New sessions are off. "
-    "Only explicit user on/off/manual requests change the mode. on allows automatic selection from the pool. "
+  "delegate_control": "Read or change THIS session's optional delegation. New sessions inherit the configured default; explicit session off overrides it. "
+    "Only explicit user on/off/manual requests change the mode; defaults are configured separately on user request. on allows automatic selection from the pool. "
     "Use the real session_id from the delegate hook or skill. Off leaves running jobs intact.",
   "delegate_catalog": "Discover valid model/effort choices before dispatch. Codex is live with TTL; "
     "other providers show configured allowlists, not proven inference availability. No inference cost.",
@@ -58,10 +64,11 @@ DESCRIPTIONS = {
     "not zero usage. API balance and subscription quota are different units. No inference.",
   "delegate_configure": "Show configuration or upsert agent/provider/limits ONLY on user request. "
     "Never store keys: providers use api_key_env OR bridge_state_dir plus bridge_account. "
-    "Bridge accounts remain separate and do not change the selected main account. Changes do not enable session delegation. "
+    "Bridge accounts remain separate and do not change the selected main account. Changes do not enable session delegation unless the user explicitly changes defaults. "
     "Agents have provider, enabled, automatic, workspace(read-only/worktree), instructions; optional models/efforts allowlists. "
     "Provider kinds: codex, claude, anthropic (Claude CLI with provider-scoped env).",
-  "delegate_run": "Start a background agent with explicit model AND effort, selection rationale, acceptance criteria, "
+  "delegate_run": "timeout_seconds=0 explicitly removes the total wall-clock limit; monitor runtime and cancel normally. "
+    "Start a background agent with explicit model AND effort, selection rationale, acceptance criteria, "
     "or use agent/model/effort='auto' to classify(category,complexity), plan and dispatch in ONE call. "
     "Pass complexity/category for each work_item: simple fast/low, standard workhorse/medium, complex frontier/high. "
     "Complex auto never falls back below its capability/effort floor. Auto can return action=main/wait/reuse/replan without starting a job. wait_seconds=50 can return completion "
@@ -70,8 +77,10 @@ DESCRIPTIONS = {
     "Never claim user authorization yourself. Prefer the least costly likely-successful choice, not blindly cheapest. "
     "No silent fallback; resume_job continues a finished same-role thread with chosen model/effort. "
     "Writes use a clean detached Git worktree; read-only sees current files. Return is a job receipt, NOT completion. "
-    "Retrieve result and verify. Set await_completion=false only for explicitly requested background work. Claude/Anthropic workers have scoped file tools, no shell; Codex can execute tests.",
-  "delegate_job": "List/get results, cancel, steer or verify jobs belonging to this session. "
+    "Retrieve result and verify. Set await_completion=false only for explicitly requested background work. "
+    "For user-authorized local commits use allow_commit=true with commit_message and relative commit_paths, on a worktree builder only. Runtime creates a scoped commit after successful execution; no inherited authorization or implicit push/merge. Claude/Anthropic workers have scoped file tools, no shell; Codex can execute tests.",
+  "delegate_job": "runtime reads liveness/progress; pass timeout_seconds=0 to remove a running new worker limit, or a positive total limit measured from its start. "
+    "List/get results, cancel, steer or verify jobs belonging to this session. "
     "detach lets an explicitly requested background job continue after this turn; archive retries safe archival of a finished owned conversation; it preserves task results and history. "
     "result can wait up to 50 seconds to avoid frequent model polling. tell is live Codex steering; other backends require resume. "
     "Completed execution is NOT acceptance. verify records accepted/needs-work/blocked with actual evidence. "
@@ -112,6 +121,15 @@ def dispatch(name: str, arguments: dict[str, Any]) -> Any:
   """Call one named operation; unknown argument names fail before execution."""
   if name not in TOOL_FUNCTIONS:
     raise ValueError("Unknown tool")
+  hosts.check(arguments)
+  if name == "delegate_budget" and os.environ.get("DELEGATE_CALLER_HOST") in {"codex", "dsh"}:
+    if arguments.get("claude_remaining_percent") is not None:
+      raise ValueError("A non-Claude parent cannot report its quota as Claude quota")
+    state = st.session(arguments["session_id"])
+    provider = state.get("parent_provider")
+    return {"host": state.get("host_kind"), "parent_provider": provider,
+            "parent_quota": service.quota(provider, session_id=arguments["session_id"]) if provider else {"status":"unknown"},
+            "parent_token_meter": "unavailable; use native host metrics"}
   return TOOL_FUNCTIONS[name](**arguments)
 
 
@@ -193,7 +211,7 @@ def hook(payload: dict[str, Any]) -> dict[str, Any]:
     notes.append("Delegate session_id=" + session_id + "; mode=" + state["mode"] +
                  "; strategy=" + state["strategy"] + "; allowed agents=" + json.dumps(state["agents"]) + ".")
     if state["mode"] == "auto":
-      notes.append("Optional delegation enabled. A task usage ledger tracks this turn. For substantial independent "
+      notes.append("Delegation is enabled for this session; use it directly for substantial tasks without requesting activation again. A task usage ledger tracks this turn. For substantial independent "
         "work use ONE delegate_run(agent/model/effort='auto',category,complexity,operation,work_item,wait_seconds=50) "
         "to classify, plan, dispatch and wait; it may choose main instead. Avoid separate planning/polling calls "
         "unless needed. Tiny tasks should stay in main with no planning calls. Resume failed work rather than "
@@ -251,11 +269,13 @@ def mcp() -> None:
         raise ValueError("JSON-RPC params must be an object")
       if method == "initialize":
         result = {"protocolVersion": params.get("protocolVersion", "2024-11-05"),
-                  "capabilities": {"tools": {}}, "serverInfo": {"name": "delegate", "version": "0.7.1"}}
+                  "capabilities": {"tools": {}}, "serverInfo": {"name": "delegate", "version": "0.12.0"}}
+        if os.environ.get("DELEGATE_CALLER_HOST") in {"codex", "dsh"}:
+          result["instructions"] = "Call delegate_host once per conversation; retain its session_id for all tools. Collect/validate every required result. Parent usage is not metered; no Claude idle hook exists here. Delegated workers cannot recursively delegate."
       elif method == "ping":
         result = {}
       elif method == "tools/list":
-        result = {"tools": tool_list()}
+        result = {"tools": [] if os.environ.get("DELEGATE_WORKER") else tool_list()}
       elif method == "tools/call":
         try:
           value = dispatch(params["name"], params.get("arguments", {}))
@@ -279,10 +299,24 @@ def main() -> None:
   """Select a transport or a JSON-on-stdin diagnostic operation."""
   os.umask(0o077)
   mode = sys.argv[1] if len(sys.argv) > 1 else "mcp"
+  if mode == "wait" and len(sys.argv) == 3 and sys.argv[2] in {"codex", "dsh"}:
+    os.environ["DELEGATE_CALLER_HOST"] = sys.argv[2]
+  if mode == "host-mcp":
+    if len(sys.argv) != 3 or sys.argv[2] not in {"codex", "dsh"}:
+      raise ValueError("Use host-mcp codex|dsh")
+    os.environ["DELEGATE_CALLER_HOST"] = sys.argv[2]
+    mcp()
+    return
   if mode == "mcp":
     mcp()
     return
   payload = json.load(sys.stdin)
+  if mode == "wait":
+    hosts.check(payload)
+    while True:
+      result = service.jobs(payload["session_id"], "result", payload["job_id"], wait_seconds=50)
+      if result["status"] not in service.ACTIVE or result["status"] == "orphaned":
+        print(json.dumps(result, ensure_ascii=False)); return
   if mode == "hook":
     print(json.dumps(hook(payload)))
   elif mode == "statusline":

@@ -89,9 +89,9 @@ def config() -> dict[str, Any]:
 
 
 def session(session_id: str) -> dict[str, Any]:
-  """Return one session; absence always means delegation is off."""
+  """Return explicit session state or the configured default for new sessions."""
   return read("session-" + key(session_id) + ".json",
-              {"mode": "off", "agents": None, "strategy": "balanced", "jobs": []})
+              {"mode": config().get("default_mode", "off"), "agents": None, "strategy": "balanced", "jobs": []})
 
 
 def save_session(session_id: str, value: dict[str, Any]) -> None:

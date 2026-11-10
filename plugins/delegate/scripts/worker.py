@@ -2,6 +2,7 @@
 from pathlib import Path
 from typing import Any
 import json
+import hashlib
 import os
 import signal
 import subprocess
@@ -15,6 +16,8 @@ from codex_rpc import CodexRPC
 from lifecycle import identity, group_running, stop_owned
 import thread_cleanup
 import credentials
+import commits
+import runtime
 
 
 def git(cwd: str, *args: str) -> str:
@@ -44,25 +47,43 @@ def prepare(value: dict[str, Any]) -> str:
   return cwd
 
 
+def commit_instruction(value: dict[str, Any]) -> str:
+  """Explain current-attempt permission, including when resuming older instructions."""
+  if value.get("allow_commit"):
+    return ("Local commit is authorized for paths " + json.dumps(value["commit_paths"]) +
+      ". Complete implementation and checks; do not run git add/commit yourself. "
+      "The runtime will create the local commit with the approved message after your successful turn. "
+      "Report unresolved failures instead of claiming completion. Push/merge remain forbidden.")
+  return "Local commit is not authorized in this attempt; leave edits for the parent."
+
+
 def packet(value: dict[str, Any]) -> str:
   """Carry explicit context and ancestor instruction files into every backend."""
   if value.get("resume_job"):
     return "\n\n".join(["Continue the prior role and constraints in the same workspace. "
       "Read any project instructions changed since the previous turn. Do not spawn other agents.",
+      ("COMMIT AUTHORIZATION\n" + commit_instruction(value)),
       "FOLLOW-UP\n" + value["task"], "ACCEPTANCE\n" + value["acceptance"], "NEW CONTEXT\n" + value["context"]])
   instruction_parts = []
+  seen_instructions = set()
   source = Path(value["source_cwd"])
   for directory in reversed([source, *source.parents]):
     for name in ("AGENTS.md", "CLAUDE.md"):
       path = directory / name
-      if path.is_file():
-        text = path.read_text()
+      if path.is_file() and path.resolve() not in seen_instructions:
+        seen_instructions.add(path.resolve())
+        with path.open() as stream:
+          text = stream.read(40001)
         if len(text) > 40000:
-          raise ValueError("Instruction file too large for automatic handoff: " + str(path))
-        instruction_parts.append(str(path) + "\n" + text)
+          instruction_parts.append("REQUIRED INSTRUCTION FILE: " + str(path) +
+            ". Before doing the task, read this entire file in bounded chunks with your file tools. "
+            "It is referenced instead of inlined due to size. If you cannot read it, report blocked.")
+        else:
+          instruction_parts.append(str(path) + "\n" + text)
   return "\n\n".join([
     "You are a delegated worker. Complete only this task. Do not spawn more agents. "
-    "Do not commit, push, merge, send messages, change credentials/configuration, or delete user files. "
+    "Do not push, merge, send messages, change credentials/configuration, or delete user files. "
+    + commit_instruction(value) + " "
     "Do not recursively scan home or filesystem roots. Read applicable child AGENTS.md/CLAUDE.md. "
     "The parent will verify your work. Report changed paths, exact tests and results, unresolved issues. "
     "If permissions prevent a check, report the limitation; do not bypass permissions.",
@@ -84,13 +105,18 @@ def message_status(job_id: str, index: int, status: str, error: str = "") -> Non
 def codex_worker(value: dict[str, Any], prompt: str) -> dict[str, Any]:
   """Run or resume a Codex turn, capturing final status, output and token usage."""
   job_id = value["id"]
-  deadline = time.monotonic() + value["timeout_seconds"]
+  started = time.monotonic()
+  deadline = runtime.deadline(value, started)
+  st.update_job(job_id, execution_started_at=time.time(),
+                execution_deadline=time.time() + value["timeout_seconds"] if value["timeout_seconds"] else None,
+                phase="initializing", progress_observable=True)
   sandbox = "read-only" if value["role"]["workspace"] == "read-only" else "workspace-write"
   st.update_job(job_id, backend_starting=True)
   def registered(pid: int) -> None:
     st.update_job(job_id, backend_identity=identity(pid, include_zombies=True), backend_starting=False)
   try:
-    connection = CodexRPC(value["provider"]["command"], on_spawn=registered)
+    connection = CodexRPC(value["provider"]["command"], on_spawn=registered, deadline=lambda: runtime.deadline(st.job(job_id), started),
+                          cancelled=lambda: st.job(job_id)["cancel_requested"])
   except FileNotFoundError:
     st.update_job(job_id, backend_starting=False)
     raise
@@ -104,33 +130,42 @@ def codex_worker(value: dict[str, Any], prompt: str) -> dict[str, Any]:
     if value.get("thread_id"):
       thread_cleanup.restore(rpc, value["thread_id"], value["session_id"])
       params.update(threadId=value["thread_id"], excludeTurns=True)
-      response = rpc.call("thread/resume", params)
+      st.update_job(job_id, phase="thread/resume")
+      response = rpc.call("thread/resume", params, timeout=120)
     else:
       params["serviceName"] = "claude_delegate"
       params["threadSource"] = "claude_delegate"
-      response = rpc.call("thread/start", params)
+      st.update_job(job_id, phase="thread/start")
+      response = rpc.call("thread/start", params, timeout=120)
     thread_id = response["thread"]["id"]
     st.update_job(job_id, thread_id=thread_id)
-    if not value.get("resume_job"):
-      rpc.call("thread/name/set", {"threadId": thread_id, "name": "[delegate] " + value["agent"] + " " + job_id})
+    # threadSource/serviceName already identify ownership; cosmetic naming must
+    # not block execution on app-server versions with slow name persistence.
     if st.job(job_id)["cancel_requested"]:
       return {"status": "cancelled"}
+    deadline = runtime.deadline(st.job(job_id), started)
+    if time.monotonic() >= deadline:
+      return {"status": "timed_out"}
+    st.update_job(job_id, phase="turn/start")
     policy = {"type": "readOnly"} if sandbox == "read-only" else {
       "type": "workspaceWrite", "writableRoots": [value["cwd"]], "networkAccess": False}
     response = rpc.call("turn/start", {"threadId": thread_id, "model": value["model"],
       "effort": value["effort"], "cwd": value["cwd"], "approvalPolicy": "never", "sandboxPolicy": policy,
-      "serviceTierForTurn": "default", "input": [{"type": "text", "text": prompt}]})
+      "serviceTierForTurn": "default", "input": [{"type": "text", "text": prompt}]},
+      timeout=120)
     turn_id = response["turn"]["id"]
-    st.update_job(job_id, turn_id=turn_id)
+    st.update_job(job_id, turn_id=turn_id, phase="executing")
     final_messages: dict[str, str] = {}
     last_control = 0.0
     last_heartbeat = 0.0
+    last_progress_write = 0.0
     stop_reason = None
     stop_at = None
     while True:
       now = time.monotonic()
       if now - last_control >= 1:
         current = st.job(job_id)
+        deadline = runtime.deadline(current, started)
         last_control = now
         if not stop_reason and (current["cancel_requested"] or now >= deadline):
           stop_reason = "cancelled" if current["cancel_requested"] else "timed_out"
@@ -164,11 +199,14 @@ def codex_worker(value: dict[str, Any], prompt: str) -> dict[str, Any]:
         continue
       if data.get("turnId") not in {None, turn_id}:
         continue
+      if method.startswith("item/") and now - last_progress_write >= 10:
+        st.update_job(job_id, last_progress_at=time.time(), progress_event=method)
+        last_progress_write = now
       if method == "item/completed":
         item = data.get("item", {})
         if item.get("type") == "agentMessage":
           final_messages[item.get("id", str(len(final_messages)))] = item.get("text", "")
-        st.update_job(job_id, last_event=item.get("type", "item"), heartbeat=time.time())
+        st.update_job(job_id, last_event=item.get("type", "item"), heartbeat=time.time(), last_progress_at=time.time())
       elif method == "thread/tokenUsage/updated":
         usage = data.get("tokenUsage") or {}
         before = value.get("usage_before", {})
@@ -181,6 +219,12 @@ def codex_worker(value: dict[str, Any], prompt: str) -> dict[str, Any]:
           continue
         status = stop_reason or {"completed": "completed", "interrupted": "cancelled",
                                  "failed": "failed"}.get(turn["status"], "failed")
+        if isinstance(turn.get("error"), dict) and turn["error"].get("codexErrorInfo") == "serverOverloaded":
+          st.write("cooldown-" + st.key(value["provider_name"]) + "-" + hashlib.sha256(value["model"].encode()).hexdigest() + ".json", {
+            "expires_at": time.time() + 60,
+            "status": "limited", "model": value["model"], "observed_at": time.time(),
+            "reason": "Model temporarily at capacity; retry after cooldown or explicitly select another model",
+            "source": "provider inference response"})
         outcome = {"status": status, "result": "\n\n".join(final_messages.values()), "error": turn.get("error")}
         break
     # No extra quota fetch per token/event: one bounded read when the task ends.
@@ -249,9 +293,12 @@ def claude_worker(value: dict[str, Any], prompt: str) -> dict[str, Any]:
     process_identity = identity(proc.pid, include_zombies=True)
     try:
       st.update_job(job_id, backend_identity=process_identity, backend_starting=False)
-      deadline = time.monotonic() + value["timeout_seconds"]
+      started = time.monotonic()
+      st.update_job(job_id, execution_started_at=time.time(), progress_observable=False, phase="executing")
+      deadline = runtime.deadline(value, started)
       while proc.poll() is None:
         current = st.job(job_id)
+        deadline = runtime.deadline(current, started)
         if current["cancel_requested"] or time.monotonic() >= deadline:
           return {"status": "cancelled" if current["cancel_requested"] else "timed_out"}
         st.update_job(job_id, heartbeat=time.time())
@@ -300,15 +347,24 @@ def main(job_id: str) -> None:
     if value["cancel_requested"]:
       outcome = {"status": "cancelled"}
       return
-    st.update_job(job_id, status="running", heartbeat=time.time(), worker_pid=os.getpid(), worker_identity=identity(os.getpid()))
+    st.update_job(job_id, status="running", heartbeat=time.time(), runtime_control_version=1, worker_pid=os.getpid(), worker_identity=identity(os.getpid()))
     cwd = prepare(value)
     value = st.job(job_id)
     value["cwd"] = cwd
+    commits.prepare(value)
     prompt = packet(value)
     if value["provider"]["kind"] == "codex":
       outcome = codex_worker(value, prompt)
     else:
       outcome = claude_worker(value, prompt)
+  except InterruptedError as exc:
+    outcome = {"status": "cancelled" if st.job(job_id).get("cancel_requested") else "failed", "error": str(exc)}
+  except TimeoutError as exc:
+    current_runtime = st.job(job_id)
+    seconds = current_runtime.get("timeout_seconds")
+    timed_out = bool(seconds and current_runtime.get("execution_started_at") and
+                     time.time() >= current_runtime["execution_started_at"] + seconds)
+    outcome = {"status": "timed_out" if timed_out else "failed", "error": str(exc)}
   except Exception as exc:
     outcome = {"status": "failed", "error": str(exc)}
   finally:
@@ -327,7 +383,23 @@ def main(job_id: str) -> None:
       if current.get("backend_starting") or group_running(current.get("backend_identity")):
         st.update_job(job_id, status="orphaned", error="Cleanup backend is unconfirmed; inspect before resuming")
       else:
-        st.update_job(job_id, **outcome, finished_at=time.time())
+        if current.get("cancel_requested"):
+          outcome.update(status="cancelled")
+        if current.get("allow_commit") and outcome.get("status") == "completed":
+          try:
+            receipt = commits.create(st.job(job_id))
+            st.update_job(job_id, git_commit=receipt)
+          except InterruptedError as exc:
+            st.update_job(job_id, git_commit={"status": "cancelled", "error": str(exc)})
+            outcome.update(status="cancelled", error=str(exc))
+          except Exception as exc:
+            st.update_job(job_id, git_commit={"status": "failed", "error": str(exc), "work_preserved": True})
+            outcome.update(status="failed", error="Local commit failed: " + str(exc))
+        final_state = st.job(job_id)
+        if final_state.get("backend_starting") or group_running(final_state.get("backend_identity")):
+          st.update_job(job_id, status="orphaned", error="Commit backend cleanup is unconfirmed; inspect before resuming")
+        else:
+          st.update_job(job_id, **outcome, finished_at=time.time())
     try:
       import handoff
       handoff.sync(st.job(job_id)["session_id"])

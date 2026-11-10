@@ -33,13 +33,13 @@
         ]
       },
       {
-        "matcher": "mcp__.*delegate_run",
+        "matcher": "mcp__.*delegate_(run|job)",
         "hooks": [
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/rewake.py\"",
             "asyncRewake": true,
-            "timeout": 14520
+            "timeout": 604800
           }
         ]
       }

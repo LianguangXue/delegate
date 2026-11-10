@@ -51,6 +51,44 @@ class DelegationTests(unittest.TestCase):
     service.catalog.assert_not_called()
     self.assertEqual(st.session("s1")["mode"], "off")
 
+  def test_configured_auto_default_enables_dispatch_without_on(self) -> None:
+    service.configure("defaults", value={"default_mode": "auto"})
+    self.assertEqual(st.session("s1")["mode"], "auto")
+    receipt = service.run(**self.args)
+    self.assertEqual(receipt["status"], "queued")
+    self.assertEqual(st.session("s2")["mode"], "auto")
+
+  def test_default_change_preserves_explicit_off_and_manual(self) -> None:
+    service.control("s1", "off")
+    service.control("manual", "manual")
+    service.configure("defaults", value={"default_mode": "auto"})
+    self.assertEqual(st.session("s1")["mode"], "off")
+    self.assertEqual(st.session("manual")["mode"], "manual")
+    self.assertEqual(st.session("new")["mode"], "auto")
+    service.configure("defaults", value={"default_mode": "off"})
+    self.assertEqual(st.session("another")["mode"], "off")
+
+  def test_default_auto_does_not_enable_manual_only_roles_or_commits(self) -> None:
+    service.configure("defaults", value={"default_mode": "auto"})
+    service.configure("agents", "codex-reviewer", {"automatic": False})
+    with self.assertRaisesRegex(ValueError, "manual-only"):
+      service.run(**self.args)
+    receipt=service.run(**self.args,one_shot=True)
+    self.assertFalse(st.job(receipt["id"])["allow_commit"])
+
+  def test_invalid_global_default_cannot_be_saved(self) -> None:
+    for value in ({"default_mode":"always"},{"default_mode":["auto"]},{"unknown":True}):
+      with self.assertRaises(ValueError):service.configure("defaults",value=value)
+    self.assertEqual(st.config().get("default_mode","off"),"off")
+
+  def test_default_auto_hook_is_directly_available_without_starting_worker(self) -> None:
+    service.configure("defaults",value={"default_mode":"auto"})
+    with patch("budget.schedule_refresh"),patch("budget.notice",return_value=("fixture","quota unknown")):
+      result=delegate.hook({"session_id":"new","hook_event_name":"SessionStart"})
+    self.assertIn("mode=auto",json.dumps(result))
+    self.assertIn("without requesting activation",json.dumps(result))
+    service.subprocess.Popen.assert_not_called()
+
   def test_opt_in_is_session_scoped_and_off_keeps_running_job(self) -> None:
     service.control("s1", "on")
     receipt = service.run(**self.args)
@@ -376,7 +414,7 @@ class DelegationTests(unittest.TestCase):
     responses = [json.loads(line) for line in process.stdout.splitlines()]
     self.assertEqual(len(responses), 4)
     self.assertEqual(responses[-1]["id"], 2)
-    self.assertEqual(len(responses[-1]["result"]["tools"]), 11)
+    self.assertEqual(len(responses[-1]["result"]["tools"]), 13)
     self.spawn.start()
 
 

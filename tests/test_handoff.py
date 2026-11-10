@@ -12,6 +12,7 @@ import unittest
 SCRIPTS = Path(__file__).resolve().parents[1] / "plugins/delegate/scripts"
 sys.path.insert(0, str(SCRIPTS))
 import handoff
+import exchange
 import delivery
 import storage as st
 
@@ -91,6 +92,17 @@ class HandoffTests(unittest.TestCase):
     st.write("handoff-s.json", outbox)
     self.assertEqual(handoff.sync("s")["revision"], revision)
     self.assertEqual(st.read("handoff-s.json")["acked_revision"], revision)
+
+  def test_exchange_uses_real_am_without_inference_or_sender_spoofing(self) -> None:
+    evidence=self.base/'manifest.json';evidence.write_text('{"rows":10}')
+    result=exchange.exchange('s','publish',{'id':'artifact','project':'fixture','task_id':'task',
+      'session_id':'spoofed','summary':'frozen replay result','evidence':'fixture checked',
+      'files':[str(evidence)]},str(self.root))
+    self.assertTrue(result['ok'],result)
+    self.assertEqual(result['result']['session_id'],'s')
+    search=exchange.exchange('s','search',{'project':'fixture','query':'replay'},str(self.root))
+    self.assertEqual(search['result']['inference_calls'],0)
+    self.assertFalse(search['inference_started'])
 
   def test_no_link_no_export_and_binding_requires_existing_task(self) -> None:
     self.assertEqual(handoff.sync("s"), {"linked": False})

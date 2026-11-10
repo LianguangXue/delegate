@@ -24,7 +24,7 @@ def _sync(session_id: str, scope: str = "") -> dict[str, Any]:
     for jid in selected[-100:]:
       j = st.job(jid)
       jobs.append({k: j.get(k) for k in ("id", "task_id", "work_item", "status", "model", "effort",
-        "review", "review_evidence", "collected_at", "source_cwd", "cwd", "base_commit", "resume_job")}
+        "review", "review_evidence", "collected_at", "source_cwd", "cwd", "base_commit", "resume_job", "git_commit")}
         | {"record_path": str(st.root() / ("job-" + jid + ".json")),
            "review_evidence": str(j.get("review_evidence") or "")[:1000],
            "acceptance": str(j.get("acceptance", ""))[:500],

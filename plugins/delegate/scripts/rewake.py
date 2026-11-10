@@ -110,7 +110,11 @@ def observe_collection(payload: dict[str, Any]) -> None:
 
 def watch(payload: dict[str, Any]) -> bool:
   """Wait for this response's owned job; return true only when Claude needs its result."""
-  if payload.get("agent_id") or not str(payload.get("tool_name", "")).endswith("delegate_run"):
+  name = str(payload.get("tool_name", ""))
+  args = payload.get("tool_input", {})
+  supported = name.endswith("__delegate_run") or (name.endswith("__delegate_job") and isinstance(args, dict)
+    and args.get("action") in {"runtime", "result"})
+  if payload.get("agent_id") or not supported:
     return False
   sid = payload.get("session_id")
   jid = receipt(payload.get("tool_response"))
@@ -126,8 +130,7 @@ def watch(payload: dict[str, Any]) -> bool:
       fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
       return False
-    deadline = time.monotonic() + max(10, int(job.get("timeout_seconds", 900))) + 90
-    while time.monotonic() < deadline:
+    while True:
       job = lifecycle.reconcile(jid)
       if job.get("collected_at"):
         archive_delivered_history(jid)
