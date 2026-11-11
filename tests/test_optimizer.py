@@ -325,6 +325,18 @@ class PlannerTests(unittest.TestCase):
     root = ac.load(self.task["id"])
     self.assertEqual((root["category"], root["complexity"]), ("parent-design", "complex"))
 
+  def test_preflight_failure_retains_classification_without_raising_retry_effort(self) -> None:
+    service.control("s", "on", strategy="preserve-claude")
+    job = {"id": "infra", "agent": "codex-reviewer", "model": "fixture-astra", "effort": "high",
+      "status": "failed", "review": "pending", "work_item": "main", "provider_name": "codex",
+      "provider": {"kind": "codex"}, "complexity": "complex", "category": "architecture",
+      "inference_state": "not_started"}
+    st.write("job-infra.json", job)
+    task = ac.load(self.task["id"]); task["jobs"] = ["infra"]; ac.save(task)
+    result = opt.plan("s")
+    self.assertEqual((result["complexity"], result["category"]), ("complex", "architecture"))
+    self.assertEqual((result["model"], result["effort"]), ("fixture-astra", "high"))
+
   def test_frontier_parent_unknown_effort_cannot_underbid_high_effort_worker(self) -> None:
     task = ac.load(self.task["id"])
     task["requests"]["parent"] = {"source": "parent", "model": "claude-opus",

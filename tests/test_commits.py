@@ -86,7 +86,8 @@ class CommitTests(unittest.TestCase):
     def backend(job,prompt):
       (self.wt/'answer.txt').write_text('new')
       return {'status':'completed','result':'fixture checked'}
-    with patch('worker.claude_worker',side_effect=backend), patch('worker.signal.signal'):
+    with patch('worker.claude_worker',side_effect=backend), patch('worker.signal.signal'), \
+         patch('worker.runtime_image.require_worker'):
       worker.main('jfixture')
     result=st.job('jfixture')
     self.assertEqual(result['status'],'completed')

@@ -12,6 +12,9 @@ import time
 import tomllib
 import re
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'plugins/delegate/scripts'))
+import runtime_image
+
 
 def backup(path):
   if path.exists():
@@ -73,18 +76,27 @@ def main():
   parser=argparse.ArgumentParser()
   parser.add_argument('host',choices=['codex','dsh','all'])
   parser.add_argument('--dsh-profile',default='web')
+  parser.add_argument('--refresh-launcher',action='store_true',help='Update only the managed launcher to a frozen runtime; preserve existing host configuration')
   args=parser.parse_args()
   repo=Path(__file__).resolve().parents[1]
-  entry=repo/'plugins/delegate/scripts/delegate.py'
   home=Path.home()
   binary=home/'.local/bin/delegate-agent'
-  preflight(repo,args,home,binary)
+  if args.refresh_launcher:
+    if binary.is_symlink() or not binary.is_file() or '# managed by delegate host installer' not in binary.read_text():
+      raise ValueError('Only an existing managed launcher can be refreshed')
+  else:
+    preflight(repo,args,home,binary)
+  image=runtime_image.freeze(repo/'plugins/delegate/scripts')
+  entry=Path(image['path'])/'delegate.py'
   binary.parent.mkdir(parents=True,exist_ok=True)
   text='#!/bin/sh\n# managed by delegate host installer\nexec '+shlex.quote(sys.executable)+' '+shlex.quote(str(entry))+' "$@"\n'
   if binary.exists() and binary.read_text()!=text:
     if '# managed by delegate host installer' not in binary.read_text():raise ValueError('Launcher already exists')
     backup(binary)
   binary.write_text(text);os.chmod(binary,0o700)
+  if args.refresh_launcher:
+    print('Updated managed launcher to frozen runtime '+image['digest']+'. Existing MCP servers require restart; host settings preserved.')
+    return
   state=Path(os.environ.get('DELEGATE_STATE_DIR',str(home/'.claude/delegate'))).resolve()
   if args.host in {'codex','all'}:
     codex=Path(os.environ.get('CODEX_HOME',str(home/'.codex')))

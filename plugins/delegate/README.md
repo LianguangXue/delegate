@@ -1,5 +1,11 @@
 # Delegate
 
+Version 0.17.1 separates confirmed runtime helpers from task/unknown processes in
+shutdown reports and rechecks recorded identities after cleanup. Raw child counts
+alone do not mean unfinished computation. Fresh and resumed workers must report
+every acceptance item with evidence, including conflicts and checks not performed;
+they must not silently skip requirements or weaken rules to match a faulty baseline.
+
 Optional local delegation for Claude Code. New sessions inherit configured default_mode (built-in fallback off). Run
 `/delegate:delegate on` to permit this session to choose configured workers, and
 `/delegate:delegate off` to stop new automatic delegation. The short alias `/delegate`
@@ -30,6 +36,23 @@ archives them again. Job results and project modifications remain preserved.
 State is stored in `~/.claude/delegate`. Read the bundled skill for configuration and
 operation details. Source, tests and full instructions are maintained locally at
 [LianguangXue/delegate](https://github.com/LianguangXue/delegate).
+
+Version 0.13 freezes runtime sources per server/worker, preserves redacted startup
+stderr and adds `delegate_job inspect` for owned processes, commands and log paths.
+Use explicit timeout_seconds=0 for long tasks; finite deadlines warn before cleanup.
+New Codex threads provide delegate_wait for completion files/owned processes without
+repeated model polling. Keep checkpoints: sandbox children may stop when the job ends.
+Restart old MCP servers to apply fixes, allowing existing experiments to finish first.
+See the repository's docs/RUNTIME.zh-CN.md for limits and upgrade instructions.
+
+Version 0.14 separates workspace infrastructure failures from model attempts. Git
+preparation defaults to 600 seconds, with owned process cleanup and durable recovery
+receipts. Same-session current CLI fallback works when a host defers MCP reload.
+Failed setup does not raise model/effort retries or erase the work item's classification.
+
+Version 0.15 adds background=true at dispatch, redacted child argv/command lines in
+shutdown results, and advisory checks for hidden local test-helper dependencies.
+Checks are static and bounded; they do not run tests or stage/copy project files.
 Install with `claude plugin marketplace add LianguangXue/delegate` then
 `claude plugin install delegate@local-delegation --scope user`.
 

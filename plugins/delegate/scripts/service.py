@@ -23,10 +23,24 @@ import optimizer
 import registration
 import commits
 import runtime
+import runtime_image
+import attempts as at
+import math
+import capabilities
 
 
 
 def catalog(provider_name: str = "codex", refresh: bool = False) -> dict[str, Any]:
+  """Discover role names alongside each provider's model and effort catalog."""
+  value = _catalog(provider_name, refresh)
+  cfg = st.config()
+  return {**value, "agents": [{"name": name, **role} for name, role in cfg["agents"].items()
+                              if role["provider"] == provider_name],
+          "configured_providers": [{"name": name, "enabled": p["enabled"]} for name, p in cfg["providers"].items()],
+          "timeout_seconds": runtime.bounds(cfg["max_timeout_seconds"])}
+
+
+def _catalog(provider_name: str, refresh: bool) -> dict[str, Any]:
   """Return supported models/efforts, caching successful Codex discovery for five minutes."""
   provider = st.config()["providers"].get(provider_name)
   if not provider:
@@ -127,6 +141,13 @@ def control(session_id: str, action: str = "status", agents: list[str] | None = 
         state["strategy"] = strategy
       st.save_session(session_id, state)
   return {"session_id": session_id, **state, "configured_agents": cfg["agents"],
+          "server_runtime": {"scripts": str(Path(__file__).resolve().parent),
+            "frozen": (Path(__file__).resolve().parent / "runtime-image.json").is_file(),
+            "legacy_session_fallback": "delegate-agent call with JSON name/arguments and the same session_id"},
+          "worktree_timeout_seconds": cfg.get("worktree_timeout_seconds", 600),
+          "timeout_seconds": runtime.bounds(cfg["max_timeout_seconds"]),
+          "execution_profiles": {"default": "sandboxed", "available": sorted(capabilities.PROFILES),
+            "authorization": "Per-role execution_profiles; host requires explicit selection and a worktree role. No automatic escalation."},
           "routing": ({"mode":"host-aware planning", "parent_provider":state.get("parent_provider") or "unknown"}
             if state.get("host_kind") in {"codex", "dsh"} else budget.recommendation(session_id)),
           "configuration": str(st.root() / "config.json"), "default_for_new_sessions": cfg.get("default_mode", "off")}
@@ -137,6 +158,9 @@ def validate_config(cfg: dict[str, Any]) -> None:
   mode = cfg.get("default_mode", "off")
   if not isinstance(mode, str) or mode not in {"off", "manual", "auto"}:
     raise ValueError("default_mode must be off/manual/auto")
+  seconds = cfg.get("worktree_timeout_seconds", 600)
+  if type(seconds) is not int or not 10 <= seconds <= 86400:
+    raise ValueError("worktree_timeout_seconds must be 10..86400 seconds")
   for field, upper in [("max_concurrency", 16), ("max_session_jobs", 1000), ("max_timeout_seconds", 14400)]:
     if type(cfg.get(field)) is not int or not 1 <= cfg[field] <= upper:
       raise ValueError("Invalid " + field)
@@ -190,7 +214,7 @@ def validate_config(cfg: dict[str, Any]) -> None:
         raise ValueError("Unsupported Claude CLI effort")
   for name, agent in cfg["agents"].items():
     st.key(name)
-    if set(agent) - {"provider", "enabled", "automatic", "workspace", "instructions", "models", "efforts"}:
+    if set(agent) - {"provider", "enabled", "automatic", "workspace", "instructions", "models", "efforts", "execution_profiles", "gpu_devices"}:
       raise ValueError("Unknown agent field")
     if agent.get("provider") not in cfg["providers"]:
       raise ValueError("Unknown agent provider")
@@ -200,6 +224,15 @@ def validate_config(cfg: dict[str, Any]) -> None:
       raise ValueError("Agent enabled/automatic must be boolean")
     if not isinstance(agent.get("instructions"), str):
       raise ValueError("Agent instructions must be a string")
+    profiles = agent.get("execution_profiles", ["sandboxed"])
+    if not isinstance(profiles, list) or not profiles or any(not isinstance(p, str) or p not in capabilities.PROFILES for p in profiles):
+      raise ValueError("execution_profiles must list sandboxed/network/host")
+    if "host" in profiles and agent["workspace"] != "worktree":
+      raise ValueError("host execution profile cannot be granted to a read-only role")
+    if cfg["providers"][agent["provider"]]["kind"] != "codex" and profiles != ["sandboxed"]:
+      raise ValueError("File-tool providers do not support expanded execution profiles")
+    if "gpu_devices" in agent:
+      capabilities.normalize({"gpu": bool(agent["gpu_devices"]), "gpu_devices": agent["gpu_devices"]})
     for field in ("models", "efforts"):
       if field in agent and (not isinstance(agent[field], list)
                              or any(not isinstance(item, str) for item in agent[field])):
@@ -218,7 +251,7 @@ def configure(section: str = "show", name: str = "", value: dict[str, Any] | Non
         raise ValueError("value must be an object")
       cfg[section][name] = {**cfg[section].get(name, {}), **value}
     elif section == "limits" and isinstance(value, dict):
-      if set(value) - {"max_concurrency", "max_session_jobs", "max_timeout_seconds", "quota_reserve_percent"}:
+      if set(value) - {"max_concurrency", "max_session_jobs", "max_timeout_seconds", "quota_reserve_percent", "worktree_timeout_seconds"}:
         raise ValueError("Unknown limit")
       cfg.update(value)
     elif section == "defaults" and isinstance(value, dict):
@@ -262,9 +295,28 @@ def summary(value: dict[str, Any], result: bool = False) -> dict[str, Any]:
   fields = ("id", "session_id", "agent", "provider_name", "model", "effort", "rationale", "status",
             "task_id", "work_item", "plan_id", "complexity", "category",
             "created_at", "finished_at", "cwd", "source_cwd", "thread_id", "turn_id", "error", "result",
-            "usage", "usage_delta", "model_usage", "acceptance", "review", "review_evidence", "messages", "last_event", "resume_job", "cancel_requested", "codex_session", "cli_session", "allow_commit", "git_commit")
+            "usage", "usage_delta", "model_usage", "acceptance", "review", "review_evidence", "messages", "last_event", "resume_job", "cancel_requested", "codex_session", "cli_session", "allow_commit", "git_commit", "runtime_image", "timeout_warning", "workspace_setup", "recovery", "await_completion", "delivery_check", "execution_environment")
   output = {field: value[field] for field in fields if field in value and (field != "result" or result)}
+  if value.get("delivery_check"):
+    report = value["delivery_check"]
+    output["delivery_check"] = {k: v for k, v in report.items() if k != "findings"}
+    output["delivery_check"]["findings"] = report.get("findings", [])[:5]
+    output["delivery_check"]["findings_in_record"] = len(report.get("findings", []))
+  if value.get("shutdown_observation"):
+    observation = value["shutdown_observation"]
+    output["shutdown_observation"] = {k: observation[k] for k in (
+      "available", "observation_version", "live_child_count", "runtime_helper_count", "workload_or_unknown_count",
+      "omitted", "observed_at", "note", "cleanup") if k in observation}
+    output["shutdown_observation"]["active_commands"] = observation.get("active_commands", [])[:8]
+    output["shutdown_observation"]["processes"] = [
+      {k: row.get(k) for k in ("pid", "ppid", "name", "command_line", "command_line_status", "cwd", "arguments_truncated",
+                              "executable", "process_kind", "classification_reason")}
+      for row in sorted(observation.get("processes", []), key=lambda row: row.get("process_kind") == "runtime_helper")[:8]]
+    output["shutdown_observation"]["processes_omitted_from_summary"] = max(0, observation.get("live_child_count", 0) - 8)
+    output["shutdown_observation"]["detail_action"] = "delegate_job inspect"
   output["runtime"] = runtime.observe(value)
+  output["background"] = not value.get("await_completion", True)
+  output["attempt"] = at.describe(value)
   output["record_path"] = str(st.root() / ("job-" + value["id"] + ".json"))
   return output
 
@@ -290,11 +342,19 @@ def run(session_id: str, agent: str, model: str, effort: str, task: str, accepta
         plan_id: str = "", category: str = "", complexity: str = "", operation: str = "read",
         estimated_main_tokens: int = 0, wait_seconds: int = 0,
         await_completion: bool = True, allow_commit: bool = False,
-        commit_message: str = "", commit_paths: list[str] | None = None) -> dict[str, Any]:
+        commit_message: str = "", commit_paths: list[str] | None = None,
+        background: bool = False, requirements: dict[str, Any] | None = None,
+        execution_profile: str = "auto") -> dict[str, Any]:
   """Dispatch under the resume guard, then wait without blocking worker archival."""
   if type(wait_seconds) is not int or not 0 <= wait_seconds <= 50:
     raise ValueError("wait_seconds must be 0..50")
+  if type(background) is not bool:
+    raise ValueError("background must be a boolean")
+  if background:
+    await_completion = False
+    wait_seconds = 0
   arguments = locals().copy()
+  arguments.pop("background")
   arguments.pop("wait_seconds")
   receipt = _dispatch(**arguments)
   if wait_seconds and receipt.get("id") and "action" not in receipt:
@@ -308,12 +368,27 @@ def _dispatch(session_id: str, agent: str, model: str, effort: str, task: str, a
         timeout_seconds: int = 900, resume_job: str | None = None, work_item: str = "",
         plan_id: str = "", category: str = "", complexity: str = "", operation: str = "read",
         estimated_main_tokens: int = 0, await_completion: bool = True, allow_commit: bool = False,
-        commit_message: str = "", commit_paths: list[str] | None = None) -> dict[str, Any]:
+        commit_message: str = "", commit_paths: list[str] | None = None,
+        requirements: dict[str, Any] | None = None, execution_profile: str = "auto") -> dict[str, Any]:
   """Validate authorization and selection, then start a detached bounded worker."""
   st.key(session_id)
   if type(one_shot) is not bool or type(await_completion) is not bool:
     raise ValueError("one_shot and await_completion must be booleans")
   cfg = st.config()
+  previous = st.job(resume_job) if resume_job else None
+  if previous and previous["session_id"] != session_id:
+    raise ValueError("Resume must use the same session")
+  if previous and agent != "auto" and previous["agent"] != agent:
+    raise ValueError("Resume must use the same session and role")
+  requirements_declared = requirements is not None
+  if previous:
+    prior_execution = capabilities.from_job(previous)
+    if requirements is None:
+      requirements = prior_execution["requirements"]
+    if execution_profile == "auto":
+      execution_profile = prior_execution["profile"] if prior_execution["profile"] != "file-tools" else "sandboxed"
+  capabilities.normalize(requirements)
+  capabilities.validate_profile(execution_profile)
   if complexity and complexity not in {"trivial", "simple", "standard", "complex"}:
     raise ValueError("Invalid complexity")
   if agent == "auto":
@@ -332,14 +407,16 @@ def _dispatch(session_id: str, agent: str, model: str, effort: str, task: str, a
         accounting.save(root_task)
     work_item = work_item or (st.job(resume_job).get("work_item", "main") if resume_job else "main")
     decision = optimizer.plan(session_id, work_item, operation, estimated_main_tokens, len(context),
-                              complexity=complexity, category=category)
+                              complexity=complexity, category=category, requirements=requirements, execution_profile=execution_profile)
     if decision["action"] != "delegate":
       return decision
     agent, model, effort, plan_id = decision["agent"], decision["model"], decision["effort"], decision["id"]
     rationale = rationale + " | " + decision["reason"]
   role = cfg["agents"].get(agent)
   if not role or not role["enabled"]:
-    raise ValueError("Agent is missing or disabled")
+    names = [name for name, row in cfg["agents"].items() if row["enabled"]]
+    raise ValueError("Agent is missing or disabled; enabled agent names: " + ", ".join(names) +
+                     ". Use delegate_catalog(provider_name=...) for roles/models/efforts")
   commits.validate(allow_commit, commit_message, commit_paths, role["workspace"])
   provider_name = role["provider"]
   provider = cfg["providers"][provider_name]
@@ -361,6 +438,12 @@ def _dispatch(session_id: str, agent: str, model: str, effort: str, task: str, a
       raise ValueError("Agent is outside this session's allowed pool")
 
   authorize(st.session(session_id))
+  execution = capabilities.select(role, provider, requirements, execution_profile)
+  if previous:
+    old = capabilities.from_job(previous)
+    execution["declared"] = requirements_declared or old.get("declared", False)
+    if execution["profile"] != old["profile"] or execution["requirements"] != old["requirements"]:
+      raise ValueError("Resume cannot change execution profile/resource requirements; create a new task with explicit handoff")
   if model_cooldown(provider_name, model):
     raise ValueError("Model is temporarily at capacity; wait for the 60-second cooldown or choose another allowed model")
   choose(role, provider, provider_name, model, effort)
@@ -373,7 +456,6 @@ def _dispatch(session_id: str, agent: str, model: str, effort: str, task: str, a
     credentials.environment(provider)
     if quota_snapshot.get("status") == "known" and quota_snapshot.get("data", {}).get("is_available") is False:
       raise ValueError("Provider reports insufficient API balance")
-  previous = st.job(resume_job) if resume_job else None
   usage_baseline = {}
   if previous:
     if previous["session_id"] != session_id or previous["agent"] != agent:
@@ -401,6 +483,7 @@ def _dispatch(session_id: str, agent: str, model: str, effort: str, task: str, a
     latest = siblings[-1]  # Session registration order is stable; cleanup can rewrite finished_at.
     usage_baseline = (latest.get("usage") or {}).get("total")
   job_id = "j" + uuid.uuid4().hex[:16]
+  image = runtime_image.freeze(Path(__file__).resolve().parent)
   parent_state = st.session(session_id)
   parent_task = accounting.load(parent_state["active_task"]) if parent_state.get("active_task") else accounting.begin(session_id)
   work_item = work_item or (previous.get("work_item", "main") if previous else "main")
@@ -408,12 +491,14 @@ def _dispatch(session_id: str, agent: str, model: str, effort: str, task: str, a
   classification = st.read("plan-" + st.key(plan_id) + ".json", {}) if plan_id else {}
   job_complexity = complexity or classification.get("complexity") or (previous or {}).get("complexity") or parent_task["complexity"]
   job_category = category or classification.get("category") or (previous or {}).get("category") or parent_task["category"]
-  value = {"allow_commit": allow_commit, "commit_message": commit_message, "commit_paths": commit_paths,
+  value = {"execution_environment": execution, "runtime_image": image, "inference_state": "not_started", "worker_wait_supported": previous.get("worker_wait_supported", False) if previous else True,
+           "allow_commit": allow_commit, "commit_message": commit_message, "commit_paths": commit_paths,
            "worktree": previous.get("worktree") if previous else None, "complexity": job_complexity, "category": job_category[:80], "id": job_id, "session_id": session_id, "await_completion": await_completion, "agent": agent, "role": copy.deepcopy(role),
            "provider_name": provider_name, "provider": copy.deepcopy(provider), "model": model, "effort": effort,
            "task": task, "context": context, "acceptance": acceptance, "rationale": rationale,
            "source_cwd": str(workdir), "cwd": previous["cwd"] if previous else str(workdir),
-           "timeout_seconds": timeout_seconds, "runtime_control_version": 1, "created_at": time.time(), "status": "queued",
+           "timeout_seconds": timeout_seconds, "runtime_control_version": 1, "runtime_revision": 0,
+           "runtime_ack_expected": True, "created_at": time.time(), "status": "queued",
            "quota_before": quota_snapshot, "cancel_requested": False, "messages": [], "review": "pending",
            "task_id": parent_task["id"], "work_item": work_item, "plan_id": plan_id or None,
            "resume_job": resume_job, "thread_id": previous["thread_id"] if previous else None,
@@ -436,7 +521,7 @@ def _dispatch(session_id: str, agent: str, model: str, effort: str, task: str, a
     st.write("active.json", active)
     registration.commit_locked(value)
   try:
-    child = subprocess.Popen([sys.executable, str(Path(__file__).with_name("worker.py")), job_id],
+    child = subprocess.Popen([sys.executable, str(Path(image["path"]) / "worker.py"), job_id],
                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                              start_new_session=True)
     st.update_job(job_id, worker_pid=child.pid, worker_identity=identity(child.pid))
@@ -448,7 +533,7 @@ def _dispatch(session_id: str, agent: str, model: str, effort: str, task: str, a
 
 def jobs(session_id: str, action: str = "list", job_id: str = "", message: str = "",
          wait_seconds: int = 0, verdict: str = "", evidence: str = "", detail: bool = False,
-         timeout_seconds: int | None = None) -> Any:
+         timeout_seconds: int | None = None, extend_seconds: int | None = None) -> Any:
   """List, inspect, interrupt, steer, or record parent verification of a task."""
   state = st.session(session_id)
   if action == "list":
@@ -456,22 +541,61 @@ def jobs(session_id: str, action: str = "list", job_id: str = "", message: str =
   value = reconcile(job_id)
   if value["session_id"] != session_id:
     raise ValueError("Job belongs to another session")
-  if action == "runtime":
+  if action == "inspect":
+    return {**summary(value), "inspection": runtime.inspect(value)}
+  if action in {"runtime", "extend"}:
+    maximum = st.config()["max_timeout_seconds"]
+    if type(wait_seconds) is not int or not 0 <= wait_seconds <= 50:
+      raise ValueError("wait_seconds must be 0..50")
+    if timeout_seconds is not None and extend_seconds is not None:
+      raise ValueError("Choose timeout_seconds (total from start) OR extend_seconds (additional time)")
+    if action == "extend" and extend_seconds is None:
+      raise ValueError("action=extend requires positive integer extend_seconds")
+    if extend_seconds is not None and (type(extend_seconds) is not int or extend_seconds <= 0):
+      raise ValueError(f"extend_seconds must be a positive integer. Finite total range: 10..{maximum} seconds; 0 removes the total limit explicitly.")
     if timeout_seconds is not None:
-      runtime.validate(timeout_seconds, st.config()["max_timeout_seconds"])
+      runtime.validate(timeout_seconds, maximum)
+    if timeout_seconds is not None or extend_seconds is not None:
       with st.locked():
         current = st.job(job_id)
         if current.get("runtime_control_version") != 1:
-          raise ValueError("Worker predates live runtime controls; restart Claude and launch/resume with the new version")
-        if current["status"] not in {"queued", "running"} or current.get("cancel_requested"):
-          raise ValueError("Runtime changes require an active non-cancelling execution")
+          raise ValueError("Worker predates live runtime controls and cannot safely extend in place. "
+            "Do not assume a record edit changes its running code; collect/resume only after it ends. "
+            "For new jobs use the installed CLI/new session. " + f"Allowed totals: 0 or 10..{maximum} seconds.")
+        if current["status"] not in {"queued", "running"} or current.get("cancel_requested") or current.get("execution_finished_at"):
+          raise ValueError("Runtime changes require an active execution before cancellation/teardown begins; an interrupted backend cannot be revived by extending its timer")
+        before = current["timeout_seconds"]
+        if extend_seconds is not None:
+          if before == 0:
+            raise ValueError("Job already has timeout_seconds=0 (no total limit); no extension is needed")
+          elapsed = math.ceil(max(0, time.time() - current["execution_started_at"])) if current.get("execution_started_at") else 0
+          timeout_seconds = max(before, elapsed) + extend_seconds
+          runtime.validate(timeout_seconds, maximum)
         current["timeout_seconds"] = timeout_seconds
         current["execution_deadline"] = (current["execution_started_at"] + timeout_seconds
           if current.get("execution_started_at") and timeout_seconds else None)
+        current["runtime_revision"] = current.get("runtime_revision", 0) + 1
         current["runtime_changed_at"] = time.time()
+        current["runtime_change"] = {"previous_timeout_seconds": before, "timeout_seconds": timeout_seconds,
+          "operation": "extend" if extend_seconds is not None else "set_total", "extend_seconds": extend_seconds}
         st.write("job-" + job_id + ".json", current)
       value = current
-    return summary(value)
+    requested_revision = value.get("runtime_revision", 0)
+    if wait_seconds and (value.get("runtime_ack_expected") or value.get("runtime_ack_version") == 1):
+      until = time.monotonic() + wait_seconds
+      while time.monotonic() < until:
+        applied = value.get("runtime_applied_revision")
+        if (value.get("runtime_revision", 0) != requested_revision or value["status"] not in {"queued", "running"}
+            or (applied is not None and applied >= requested_revision
+                and value.get("runtime_applied_timeout_seconds") == value["timeout_seconds"])):
+          break
+        time.sleep(min(0.25, max(0, until-time.monotonic())))
+        value = st.job(job_id)
+    result = summary(value)
+    result["runtime"]["allowed_timeout_seconds"] = runtime.bounds(maximum)
+    result["runtime"]["last_change"] = value.get("runtime_change")
+    result["runtime"]["request_superseded"] = value.get("runtime_revision", 0) != requested_revision
+    return result
   if action == "detach":
     return summary(st.update_job(job_id, await_completion=False))
   if action == "archive":

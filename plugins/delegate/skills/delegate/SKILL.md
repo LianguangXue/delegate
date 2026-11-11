@@ -11,18 +11,57 @@ Use the delegate MCP tools with this exact session ID. If unavailable, report th
 `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/delegate.py" call` with JSON (`name`, `arguments`) on stdin via
 quoted heredoc. Never interpolate task text or credentials into shell code.
 
+If a plugin upgrade leaves an older MCP connected (legacy runtime identity errors,
+or old attempt-limit errors after only pre-inference failures), stop retrying that
+connection. Use the installed `delegate-agent call` with the SAME JSON name/arguments
+and session_id for control/plan/run/result. This starts the current frozen service and
+keeps the original task state and authorization checks. A new session also works;
+`/reload-plugins` may defer MCP changes until then in non-terminal hosts. Never weaken
+runtime identity checks or increase max_attempts merely to bypass an upgrade failure.
+
 ## Controls
+
+Before dispatch, declare the actual command-execution needs in requirements: gpu/ssh/network
+booleans, allocated gpu_devices strings, and ssh_targets/network_targets host+port objects.
+Reviewing GPU code or reading existing outputs alone does not require GPU access. Never guess
+GPU allocations or use reserved devices. Network targets are direct TCP probe endpoints;
+for proxies/jump hosts declare the reachable relay rather than assuming a direct final route.
+execution_profile auto chooses sandboxed/network within role grants and never host. Host is
+explicit and requires a permitted worktree role; it removes OS filesystem isolation. Do not
+enable permissions or drop declarations to evade a failed check. File-tool workers cannot
+perform these command workloads. A preflight passed result is not a GPU lease, SSH login,
+framework validation or business-operation guarantee. Inspect execution_environment.
+If an old MCP schema rejects these fields, use the current fixed CLI with the SAME session_id.
 
 - `on`, `off`, `mode manual`, `status`: delegate_control. Only explicit user requests change mode or the default. New sessions inherit configured default_mode; explicit off is preserved.
   `on` is session-scoped; optional agents set the pool, strategy is balanced/preserve-claude/quality-first.
   Off leaves running jobs intact. New sessions use configured default_mode (built-in fallback off); role/provider configuration persists separately.
 - `run <role> <task>`: explicit single-task authorization; use delegate_run(one_shot=true), without changing mode.
+- Explicit background work: pass `background=true` directly to delegate_run. It implies await_completion=false
+  and returns immediately even if wait_seconds was supplied; no separate detach call is needed. Ordinary required
+  work remains foreground-to-parent by default. This does not keep sandbox child computations alive after the worker ends.
 - `models [provider]`: delegate_catalog. Models and efforts must be supported; roles can narrow the allowlist.
 - `quota`: delegate_quota for enabled providers, passing session_id. `budget`: delegate_budget for routing evidence.
   `budget claude <percent>` records ONLY an explicitly user-supplied remaining percentage, labelled and expiring.
 - `agents` / `providers`: delegate_configure(show). Before adding/editing, read [accounts](references/accounts.md).
 - `jobs`, `result <id>`, `tell <id> <instruction>`, `cancel <id>`, `archive <id>`: delegate_job.
   Tell supports live Codex steering; other providers receive follow-up through resume after completion.
+- `inspect <id>`: delegate_job(action="inspect") for owned host/namespace process IDs, active commands,
+  stderr/output log paths, runtime image and shutdown observations. Check diagnostics before retrying.
+  Pre-shutdown process rows include redacted argv/command_line and cwd independently of tool command events.
+  Inspect delivery_check findings before acceptance: missing/uncommitted/external Python helpers can make tests
+  non-reproducible in a fresh checkout. The checker is bounded and advisory, never runs tests or stages/copies files.
+- Extend an already-running supported job with delegate_job(action="extend", extend_seconds=3600,
+  wait_seconds=5). Do not wait for timeout or start a replacement. This adds after its deadline/now,
+  within configured total bounds. runtime(timeout_seconds=...) sets the total from original start;
+  0 removes the limit explicitly. Read actual bounds from control status/runtime. Check change_state
+  and worker_applied_timeout_seconds: pending is not acknowledgement; legacy unconfirmed is not proof
+  of application. Already-cancelling/finished or pre-control workers cannot be revived this way.
+- For long computations, explicitly choose timeout_seconds=0 or a sufficient finite limit from catalog;
+  action="runtime" can change active supported workers. Finite deadlines warn but checkpointing is not guaranteed.
+  New Codex threads have delegate_wait for completion files/owned processes, reducing repeated polling inference.
+  Put project-specific offline/check-only flags in context; require incremental checkpoints and run-specific receipts.
+  Do not mark work done while required background computation remains; its processes may stop with the sandbox.
 - `resume <id> <task>`: inspect the prior result, then delegate_run(resume_job=id) with the same role/source_cwd.
   Preserve work_item within a task. Do not start conflicting work until cancellation/cleanup is confirmed.
 - `task list`, `report <task-id>`: delegate_task. `compare <case-key>` compares complete accepted equivalent cases.
@@ -99,6 +138,14 @@ Resume failed work with new failure evidence rather than starting over. Three at
 default bound; revisit the approach when exhausted. User-requested limits are configurable at task begin.
 
 Inspect actual outputs/diffs/checks. Then combine child and parent acceptance:
+
+Every acceptance item remains required. Workers report PASS/FAIL/BLOCKED/NOT_RUN/CONFLICT
+with evidence; neither worker nor parent may silently skip items or weaken evaluation
+rules, inputs, tolerances, tests or expected results to pass. Old/baseline results can
+be wrong. On conflict, preserve the original criterion, record the contradicting
+artifact/command evidence and proposed correction, and seek an explicit parent decision.
+Use blocked/needs-work while unresolved. If acceptance is explicitly revised, disclose
+the revision and revalidate; do not report it as passing the original requirement.
 
 `delegate_task(action="finish", accepted_jobs=[...], verdict="accepted"|"needs-work"|"blocked", evidence=...)`
 

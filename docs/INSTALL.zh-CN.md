@@ -1,8 +1,17 @@
 # 快速安装：Claude Code、Codex、DeepSeek Harness
 
-当前发布：delegate 0.12.0；可选 am 0.4.0。运行环境：Linux、Python 3.12+。
+当前实现：delegate 0.17.1；可选 am 0.4.0+。运行环境：Linux、Python 3.12+。
 只安装你需要的入口即可，不必装齐所有模型。Python 核心无需第三方包。
 本文不包含或要求上传任何 API Key。
+
+GPU／SSH／任务命令联网需求应在派发时通过 requirements 声明；network／host 权限
+需要角色明确允许，host 会取消 Codex OS 文件系统隔离，不是默认设置。预检在模型推理前
+执行，不代表已取得 GPU 租约或 SSH 登录授权。[执行环境与预检说明](EXECUTION.md)。
+
+0.17.1 区分运行时辅助进程与未完成任务，增加清理后观察，并固化验收冲突报告规则。
+固定运行代码、启动诊断及 Codex 计算等待工具从 0.13 起提供。已有用户请先阅读
+[运行与排障](RUNTIME.zh-CN.md)。旧 MCP 进程不会热更新；让它们完成现有任务，
+再重载插件／重启会话。不要为升级终止仍在运行的实验。
 
 ## 1. 先准备可用的后端
 

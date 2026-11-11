@@ -14,6 +14,7 @@ DEFAULT_CONFIG = {
   "max_concurrency": 2,
   "max_session_jobs": 20,
   "max_timeout_seconds": 1800,
+  "worktree_timeout_seconds": 600,
   "quota_reserve_percent": 5,
   "routing": {"claude_low_remaining_percent": 20, "claude_critical_remaining_percent": 5,
               "prefer_external_when_unknown": True},
@@ -42,7 +43,7 @@ def root() -> Path:
   """Return the private state directory, overridable for isolated tests."""
   path = Path(os.environ.get("DELEGATE_STATE_DIR", str(Path.home() / ".claude" / "delegate")))
   path.mkdir(mode=0o700, parents=True, exist_ok=True)
-  return path
+  return path.resolve()
 
 
 def key(value: str) -> str:

@@ -9,6 +9,7 @@ import uuid
 
 import storage as st
 from lifecycle import ACTIVE
+import attempts as at
 
 FIELDS = ("uncached_input", "cached_input", "cache_write", "output")
 READ_LIMIT = 2 * 1024 * 1024
@@ -233,6 +234,8 @@ def hook(payload: dict[str, Any]) -> None:
 
 def job_usage(job: dict[str, Any]) -> dict[str, int] | None:
   """Use per-turn Codex deltas and per-invocation Claude totals, including failed attempts."""
+  if not at.model_attempted(job):
+    return {field: 0 for field in FIELDS}
   if job["provider"]["kind"] == "codex":
     return normalize(job.get("usage_delta"), "codex")
   return normalize(job.get("usage"))
@@ -256,7 +259,7 @@ def report(task: dict[str, Any]) -> dict[str, Any]:
     children.append({"id": job_id, "status": job["status"], "review": job.get("review"),
                      "work_item": job.get("work_item", "main"), "model": job["model"], "effort": job["effort"],
                      "complexity": job.get("complexity", task["complexity"]),
-                     "category": job.get("category", task["category"])})
+                     "category": job.get("category", task["category"]), **at.describe(job)})
   if not task["parent_observed"]:
     issues.append("parent usage not observed")
   if not task.get("parent_complete"):
@@ -301,10 +304,12 @@ def calibrate_locked(task: dict[str, Any]) -> None:
                  "category": job.get("category", task["category"]), "complexity": job.get("complexity", task["complexity"]),
                  "tokens": totals([usage])["processed_tokens"] if usage else None,
                  "accepted": job.get("review") == "accepted",
-                 "quality_known": failed or job.get("review") == "accepted"})
+                 "quality_known": failed or job.get("review") == "accepted", "model_attempted": at.model_attempted(job)})
   history = st.read("optimization-samples.json", {})
+  model_attempts = sum(row["model_attempted"] for row in rows)
   history[task["id"]] = {"category": task["category"], "complexity": task["complexity"], "rows": rows,
-    "parent_share": result["parent"]["processed_tokens"] / max(1, len(task["jobs"])) if result["measurement_complete"] else None,
+    "parent_share": result["parent"]["processed_tokens"] / model_attempts
+      if result["measurement_complete"] and model_attempts else None,
     "main_models": sorted({r["model"] for r in task["requests"].values() if r["source"] == "parent"}),
     "measurement_complete": result["measurement_complete"],
     "total": result["total"]["processed_tokens"], "arm": task["arm"], "verdict": task["verdict"]}

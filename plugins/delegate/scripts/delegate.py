@@ -9,6 +9,10 @@ import sys
 import time
 import types
 
+if __name__ == "__main__":
+  import runtime_image
+  runtime_image.bootstrap()
+
 import service
 import storage as st
 import budget
@@ -20,6 +24,8 @@ import handoff
 import inspection
 import hosts
 import exchange
+import attempts as at
+import capabilities
 
 TOOL_FUNCTIONS = {
   "delegate_host": hosts.connect,
@@ -58,16 +64,17 @@ DESCRIPTIONS = {
   "delegate_control": "Read or change THIS session's optional delegation. New sessions inherit the configured default; explicit session off overrides it. "
     "Only explicit user on/off/manual requests change the mode; defaults are configured separately on user request. on allows automatic selection from the pool. "
     "Use the real session_id from the delegate hook or skill. Off leaves running jobs intact.",
-  "delegate_catalog": "Discover valid model/effort choices before dispatch. Codex is live with TTL; "
+  "delegate_catalog": "Discover exact agent names, roles, enabled flags, timeout bounds and valid model/effort choices before dispatch. Codex is live with TTL; "
     "other providers show configured allowlists, not proven inference availability. No inference cost.",
   "delegate_quota": "Read quota/remaining balances and timestamp. Missing Claude Team data is unknown, "
     "not zero usage. API balance and subscription quota are different units. No inference.",
   "delegate_configure": "Show configuration or upsert agent/provider/limits ONLY on user request. "
+    "limits.worktree_timeout_seconds configures each workspace Git command (default 600, allowed 10..86400); separate from model runtime. "
     "Never store keys: providers use api_key_env OR bridge_state_dir plus bridge_account. "
     "Bridge accounts remain separate and do not change the selected main account. Changes do not enable session delegation unless the user explicitly changes defaults. "
     "Agents have provider, enabled, automatic, workspace(read-only/worktree), instructions; optional models/efforts allowlists. "
     "Provider kinds: codex, claude, anthropic (Claude CLI with provider-scoped env).",
-  "delegate_run": "timeout_seconds=0 explicitly removes the total wall-clock limit; monitor runtime and cancel normally. "
+  "delegate_run": "Declare actual task execution needs in requirements: gpu/ssh/network booleans, allocated gpu_devices strings, ssh_targets/network_targets host+port (direct TCP probes, not logins or firewall allowlists). execution_profile auto picks sandboxed/network from role grants and never host; explicit host needs an approved worktree role. File-tool workers cannot execute these resources. Checks run under the selected sandbox before inference; unsupported needs fail without model usage. Never drop requirements or escalate profiles to work around failure. background=true dispatches without waiting and implies await_completion=false. timeout_seconds=0 explicitly removes the total wall-clock limit. "
     "Start a background agent with explicit model AND effort, selection rationale, acceptance criteria, "
     "or use agent/model/effort='auto' to classify(category,complexity), plan and dispatch in ONE call. "
     "Pass complexity/category for each work_item: simple fast/low, standard workhorse/medium, complex frontier/high. "
@@ -77,13 +84,15 @@ DESCRIPTIONS = {
     "Never claim user authorization yourself. Prefer the least costly likely-successful choice, not blindly cheapest. "
     "No silent fallback; resume_job continues a finished same-role thread with chosen model/effort. "
     "Writes use a clean detached Git worktree; read-only sees current files. Return is a job receipt, NOT completion. "
-    "Retrieve result and verify. Set await_completion=false only for explicitly requested background work. "
+    "Retrieve result and verify every acceptance item. Evidence conflicts must be reported as CONFLICT, not skipped or hidden by changing rules/baselines. Set await_completion=false only for explicitly requested background work. "
     "For user-authorized local commits use allow_commit=true with commit_message and relative commit_paths, on a worktree builder only. Runtime creates a scoped commit after successful execution; no inherited authorization or implicit push/merge. Claude/Anthropic workers have scoped file tools, no shell; Codex can execute tests.",
-  "delegate_job": "runtime reads liveness/progress; pass timeout_seconds=0 to remove a running new worker limit, or a positive total limit measured from its start. "
+  "delegate_job": "Extend a RUNNING supported worker with action='extend', extend_seconds=3600; no need to wait for timeout/resume. Adds after the later of its deadline/now, within configured total bounds. runtime timeout_seconds sets a total from the original start; 0 explicitly removes the total limit. Both return allowed range, remaining time, new deadline, and worker change_state (pending/applied/unconfirmed). wait_seconds up to 50 waits for acknowledgement in code; legacy workers cannot be hot-upgraded or revived after cancellation. inspect lists owned redacted process commands and delivery diagnostics. "
+    "Receipts show attempt counting and workspace_setup recovery/retained paths. Proven pre-inference infrastructure failures do not count toward model attempts; unknown/possibly executed requests still count. "
     "List/get results, cancel, steer or verify jobs belonging to this session. "
     "detach lets an explicitly requested background job continue after this turn; archive retries safe archival of a finished owned conversation; it preserves task results and history. "
     "result can wait up to 50 seconds to avoid frequent model polling. tell is live Codex steering; other backends require resume. "
     "Completed execution is NOT acceptance. verify records accepted/needs-work/blocked with actual evidence. "
+    "Unresolved acceptance conflicts, skipped checks or disputed baselines require blocked/needs-work and an explicit parent decision, never a silently weakened acceptance. "
     "Do not retry a write until the prior job has stopped and its worktree has been inspected.",
 }
 
@@ -111,6 +120,10 @@ def tool_list() -> list[dict[str, Any]]:
       properties[param.name] = schema(hints[param.name])
       if param.default is inspect.Parameter.empty:
         required.append(param.name)
+    if "requirements" in properties:
+      properties["requirements"] = capabilities.input_schema()
+    if "execution_profile" in properties:
+      properties["execution_profile"] = {"type":"string","enum":["auto",*sorted(capabilities.PROFILES)]}
     result.append({"name": name, "description": DESCRIPTIONS[name],
                    "inputSchema": {"type": "object", "properties": properties,
                                    "required": required, "additionalProperties": False}})
@@ -200,6 +213,20 @@ def hook(payload: dict[str, Any]) -> dict[str, Any]:
     return {}  # Metering must never extend Stop or inject parent instructions into children.
   state = st.session(session_id)
   notes = []
+  legacy = next((jid for jid in reversed(state["jobs"][-10:]) if at.legacy_preflight(st.job(jid))
+                 and str(st.job(jid).get("error", "")).startswith("Legacy parent")), None)
+  if legacy:
+    with st.locked():
+      current = st.session(session_id)
+      if current.get("legacy_recovery_notice") != legacy:
+        current["legacy_recovery_notice"] = legacy
+        st.save_session(session_id, current)
+        notes.append("A delegate job was rejected before inference because its MCP parent predates frozen runtimes. "
+          "Do not repeatedly dispatch through that same server. /reload-plugins may defer MCP changes to the next session. "
+          "Use the installed delegate-agent call CLI with JSON name/arguments and the SAME session_id=" + session_id +
+          ", or start a new session. The CLI retains current role, mode, quota and work-item checks. "
+          "Proven pre-inference failures do not consume the current release's model-attempt budget; "
+          "parent coordination still consumes usage. No failed task is replayed automatically.")
   task = accounting.load(state["active_task"]) if state.get("active_task") else None
   if state["mode"] == "auto" and task and task["complexity"] == "trivial" and not task["jobs"]:
     if event in {"SessionStart", "UserPromptSubmit"}:
@@ -269,7 +296,7 @@ def mcp() -> None:
         raise ValueError("JSON-RPC params must be an object")
       if method == "initialize":
         result = {"protocolVersion": params.get("protocolVersion", "2024-11-05"),
-                  "capabilities": {"tools": {}}, "serverInfo": {"name": "delegate", "version": "0.12.0"}}
+                  "capabilities": {"tools": {}}, "serverInfo": {"name": "delegate", "version": "0.17.1"}}
         if os.environ.get("DELEGATE_CALLER_HOST") in {"codex", "dsh"}:
           result["instructions"] = "Call delegate_host once per conversation; retain its session_id for all tools. Collect/validate every required result. Parent usage is not metered; no Claude idle hook exists here. Delegated workers cannot recursively delegate."
       elif method == "ping":
@@ -299,7 +326,7 @@ def main() -> None:
   """Select a transport or a JSON-on-stdin diagnostic operation."""
   os.umask(0o077)
   mode = sys.argv[1] if len(sys.argv) > 1 else "mcp"
-  if mode == "wait" and len(sys.argv) == 3 and sys.argv[2] in {"codex", "dsh"}:
+  if mode in {"wait", "call"} and len(sys.argv) == 3 and sys.argv[2] in {"codex", "dsh"}:
     os.environ["DELEGATE_CALLER_HOST"] = sys.argv[2]
   if mode == "host-mcp":
     if len(sys.argv) != 3 or sys.argv[2] not in {"codex", "dsh"}:

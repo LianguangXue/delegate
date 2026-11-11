@@ -18,6 +18,7 @@ import worker
 import lifecycle
 import rewake
 import codex_rpc
+import runtime_image
 
 CATALOG = {"models": [{"id": "test-model", "model": "test-model", "supportedReasoningEfforts": [
   {"reasoningEffort": "low"}, {"reasoningEffort": "high"}]}]}
@@ -203,6 +204,21 @@ class DelegationTests(unittest.TestCase):
     self.assertIn(receipt["id"], delegate.hook(payload)["reason"])
     service.jobs("s1", "detach", receipt["id"])
     self.assertEqual(delegate.hook(payload), {})
+
+  def test_background_argument_dispatches_detached_without_waiting(self) -> None:
+    with patch("service.jobs") as jobs:
+      receipt = service.run(**self.args, one_shot=True, background=True, wait_seconds=50)
+    jobs.assert_not_called()
+    self.assertTrue(receipt["background"])
+    self.assertFalse(receipt["await_completion"])
+    self.assertFalse(st.job(receipt["id"])["await_completion"])
+    self.assertEqual(delegate.hook({"session_id":"s1","hook_event_name":"Stop"}), {})
+
+  def test_background_does_not_enable_delegation_or_accept_non_boolean(self) -> None:
+    with self.assertRaisesRegex(ValueError,"off/manual"):
+      service.run(**self.args,background=True)
+    with self.assertRaisesRegex(ValueError,"background must be"):
+      service.run(**self.args,one_shot=True,background="yes")
 
   def test_wait_progress_allows_another_stop_continuation(self) -> None:
     receipt = service.run(**self.args, one_shot=True)
@@ -463,14 +479,15 @@ class WorkspaceTests(unittest.TestCase):
                       'signal.signal(signal.SIGTERM,stop)\ntime.sleep(60)\n')
       fake.chmod(0o700)
       with patch.dict(os.environ, {"DELEGATE_STATE_DIR": str(Path(directory) / "state")}):
-        value = {"id": "canceltest", "session_id": "s1", "source_cwd": directory, "cwd": directory,
+        image = runtime_image.freeze(SCRIPTS)
+        value = {"runtime_image": image, "id": "canceltest", "session_id": "s1", "source_cwd": directory, "cwd": directory,
                  "role": {"workspace": "read-only", "instructions": "fixture"},
                  "provider": {"kind": "claude", "command": str(fake)}, "provider_name": "claude",
                  "model": "haiku", "effort": "low", "task": "x" * 90000, "context": "",
                  "acceptance": "fixture", "created_at": time.time(), "timeout_seconds": 30,
                  "status": "queued", "cancel_requested": False}
         st.write("job-canceltest.json", value)
-        process = subprocess.Popen([sys.executable, str(SCRIPTS / "worker.py"), "canceltest"])
+        process = subprocess.Popen([sys.executable, str(Path(image["path"]) / "worker.py"), "canceltest"])
         try:
           deadline = time.monotonic() + 5
           while not st.job("canceltest").get("backend_identity") and time.monotonic() < deadline:
@@ -511,6 +528,7 @@ class WorkspaceTests(unittest.TestCase):
         (output / "file.txt").write_text("changed\n")
         self.assertEqual((source / "file.txt").read_text(), "baseline\n")
         (source / "dirty.txt").write_text("user data")
+        st.write("job-second.json", dict(value, id="second"))
         with self.assertRaisesRegex(ValueError, "clean source"):
           worker.prepare(dict(value, id="second"))
 

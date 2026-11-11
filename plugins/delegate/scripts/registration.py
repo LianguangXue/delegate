@@ -42,7 +42,8 @@ def recover_locked() -> None:
     # registration never launched inference. Do not leave a phantom active slot.
     job = st.job(jid)
     if job["status"] == "queued" and not job.get("worker_identity"):
-      job.update(status="failed", error="Registration interrupted before worker launch", finished_at=time.time())
+      job.update(status="failed", error="Registration interrupted before worker launch", finished_at=time.time(),
+                 inference_state="not_started", failure_kind="infrastructure")
       if job["provider"]["kind"] == "codex":
         job["usage_delta"] = {"inputTokens": 0, "outputTokens": 0, "cachedInputTokens": 0}
       else:

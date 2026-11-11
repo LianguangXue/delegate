@@ -2,7 +2,35 @@
 
 A shared delegation engine for Claude Code, Codex and DeepSeek Harness, with
 per-task model/effort, durable results and configured Claude/Codex/API workers.
-Version 0.12.0. Activation is configurable; new installations default off.
+Version 0.17.1. Activation is configurable; new installations default off.
+
+Shutdown reports distinguish confirmed runtime helpers from task/unknown children and
+recheck recorded identities after cleanup. Raw child counts alone do not mean unfinished
+work. Every worker must report acceptance conflicts and unperformed checks explicitly;
+criteria cannot be silently skipped or weakened to match a faulty baseline.
+
+Declare GPU/SSH/command-network needs before dispatch using `requirements` and a
+role-permitted `execution_profile`. Launch preflight runs under the selected policy
+before inference; default sandboxing stays unchanged and host access is explicit.
+See [execution requirements and limits](docs/EXECUTION.md).
+
+Running supported jobs can be extended directly with
+`delegate_job(action="extend", extend_seconds=3600, wait_seconds=5)`. Errors and runtime
+status show actual timeout bounds; worker acknowledgement distinguishes a written change
+from an applied one. No timeout/resume cycle or additional model is required.
+
+Use `delegate_run(background=true)` for explicitly requested background work, without
+a second detach call. Results now include redacted pre-shutdown child command lines
+and an advisory static check for tests depending on uncommitted/ignored local helpers.
+
+Runtime reliability: frozen server/worker images, redacted startup stderr, process/log
+inspection, finite-deadline checkpoint warnings and Codex no-inference condition waits.
+See [runtime and troubleshooting](docs/RUNTIME.zh-CN.md). Existing MCP servers need restart.
+
+Workspace preparation now defaults to 600 seconds per Git command with cancellation,
+owned-process cleanup and checkout recovery. Proven pre-inference failures do not consume
+the model-attempt limit or trigger escalation. An existing session can use the current
+`delegate-agent call` CLI when its host defers MCP reload, retaining the same session ID.
 
 ## Quick start / 快速开始
 

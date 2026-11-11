@@ -7,6 +7,8 @@ import uuid
 import storage as st
 import accounting as ac
 import budget
+import attempts as at
+import capabilities
 from lifecycle import ACTIVE
 
 EFFORTS = ["low", "medium", "high", "xhigh", "max", "ultra"]
@@ -47,6 +49,8 @@ def observations(task: dict[str, Any], agent: str, model: str, effort: str,
   costs, overheads, accepted, attempts, unknown = [], [], 0, 0, 0
   for previous in history.values():
     for job in previous["rows"]:
+      if job.get("model_attempted") is False:
+        continue
       if (job.get("category", previous["category"]), job.get("complexity", previous["complexity"])) != (task["category"], task["complexity"]):
         continue
       if (job["agent"], job["model"], job["effort"]) != (agent, model, effort):
@@ -82,16 +86,21 @@ def work_state(task: dict[str, Any], work_item: str) -> dict[str, Any] | None:
       return {"action": "replan", "reason": "; ".join(check["blockers"])}
   if accepted:
     return {"action": "reuse", "job_id": accepted[-1]["id"], "reason": "Reuse validated output instead of repeating it"}
-  if len(jobs) >= task["max_attempts"]:
+  counted = [j for j in jobs if at.model_attempted(j)]
+  if len(counted) >= task["max_attempts"]:
     return {"action": "replan", "reason": "Work-item attempt limit reached; revisit the approach before spending more"}
   return None
 
 
 def plan(session_id: str, work_item: str = "main", operation: str = "read",
          estimated_main_tokens: int = 0, context_chars: int = 0, refresh: bool = False,
-         complexity: str = "", category: str = "") -> dict[str, Any]:
+         complexity: str = "", category: str = "", requirements: dict[str, Any] | None = None,
+         execution_profile: str = "auto") -> dict[str, Any]:
   """Recommend main or a concrete role/model/effort; no inference or dispatch occurs here."""
   import service  # Delayed to keep service's execution gates independent.
+  needed = capabilities.normalize(requirements)
+  capabilities.validate_profile(execution_profile)
+  needs_environment = any(needed[k] for k in ("gpu", "ssh", "network")) or execution_profile not in {"auto", "sandboxed"}
   if operation not in {"read", "write"} or type(estimated_main_tokens) is not int or estimated_main_tokens < 0:
     raise ValueError("Invalid operation or token estimate")
   if type(context_chars) is not int or not 0 <= context_chars <= 100000:
@@ -101,9 +110,13 @@ def plan(session_id: str, work_item: str = "main", operation: str = "read",
   st.key(work_item)
   state = st.session(session_id)
   if state["mode"] != "auto":
+    if needs_environment:
+      return {"action":"replan","reason":"Delegation is off/manual and main environment capabilities are unverified; use explicit one-shot selection or authorized non-model preflight"}
     return {"action": "main", "reason": "Automatic delegation is off/manual; explicit one-shot selection remains available"}
   task = ac.load(state["active_task"]) if state.get("active_task") else ac.begin(session_id)
   if task["arm"] == "baseline":
+    if needs_environment:
+      return {"action":"replan","reason":"Baseline excludes delegation and does not verify main execution capabilities"}
     return {"action": "main", "reason": "Baseline arm excludes plugin delegation"}
   with st.locked():
     task = ac.load(task["id"])
@@ -111,11 +124,12 @@ def plan(session_id: str, work_item: str = "main", operation: str = "read",
     ac.save(task)
     reuse = work_state(task, work_item)
     measurement = ac.report(task)
-    previous_jobs = [st.job(j) for j in task["jobs"] if st.job(j).get("work_item", "main") == work_item]
+    work_jobs = [st.job(j) for j in task["jobs"] if st.job(j).get("work_item", "main") == work_item]
+    previous_jobs = [j for j in work_jobs if at.model_attempted(j)]
   if reuse:
     return reuse
   # Classification belongs to this work item; do not relabel its parent ledger.
-  prior = previous_jobs[-1] if previous_jobs else {}
+  prior = work_jobs[-1] if work_jobs else {}
   task = {**task, "complexity": complexity or prior.get("complexity") or task["complexity"],
           "category": (category or prior.get("category") or task["category"])[:80]}
   if task["token_budget"] and measurement["total"]["processed_tokens"] >= task["token_budget"]:
@@ -131,9 +145,26 @@ def plan(session_id: str, work_item: str = "main", operation: str = "read",
     main_tokens, main_source = round(statistics.median(main_samples)), "empirical main-only tasks"
   # Trivial work remains in main even if another subscription has unused capacity.
   if task["complexity"] == "trivial":
+    if needs_environment:
+      return {"action":"replan","reason":"This small task needs an execution-environment check; use authorized non-model preflight rather than assuming main capabilities or spending a worker model call"}
     return {"action": "main", "reason": "Avoid worker startup and handoff overhead for trivial work",
             "estimate_source": "bootstrap heuristic, not a measured saving"}
   cfg = st.config()
+  execution_specs, capability_errors = {}, {}
+  for name, role in cfg["agents"].items():
+    provider = cfg["providers"][role["provider"]]
+    if not role["enabled"] or not role["automatic"] or not provider["enabled"]:
+      continue
+    if state["agents"] is not None and name not in state["agents"]:
+      continue
+    if (operation == "write") != (role["workspace"] == "worktree"):
+      continue
+    try:
+      execution_specs[name] = capabilities.select(role, provider, requirements, execution_profile)
+    except ValueError as exc:
+      capability_errors["agent:" + name] = str(exc)
+  if needs_environment and not execution_specs:
+    return {"action":"replan","reason":"No permitted role satisfies the execution requirements; main capabilities are unverified", "errors":capability_errors}
   if refresh and state.get("host_kind", "claude") == "claude":
     service.quota("claude", refresh=True, session_id=session_id)
   host = state.get("host_kind", "claude")
@@ -151,7 +182,7 @@ def plan(session_id: str, work_item: str = "main", operation: str = "read",
     routing = {"mode":"normal"}
   parent_quota_kind = "codex" if parent_provider and cfg["providers"][parent_provider]["kind"] == "codex" else "claude"
   main_pressure = pressure(parent_sample, parent_quota_kind)
-  candidates, errors, catalogs, quotas, pressures = [], {}, {}, {}, {}
+  candidates, errors, catalogs, quotas, pressures = [], capability_errors, {}, {}, {}
   desired_tier = {"simple": 0, "standard": 1, "complex": 2}[task["complexity"]]
   desired_effort = {"simple": "low", "standard": "medium", "complex": "high"}[task["complexity"]]
   if previous_jobs:
@@ -175,6 +206,9 @@ def plan(session_id: str, work_item: str = "main", operation: str = "read",
       continue
     if provider_name == parent_provider and routing["mode"] in {"external-preferred", "handoff"}:
       continue
+    if name not in execution_specs:
+      continue
+    execution = execution_specs[name]
     try:
       if provider_name not in catalogs:
         catalogs[provider_name] = service.catalog(provider_name, refresh=refresh)
@@ -223,6 +257,7 @@ def plan(session_id: str, work_item: str = "main", operation: str = "read",
                     if source == "empirical" else startup + handoff + main_tokens)
         quota_pressure = pressures[provider_name]
         candidates.append({"action": "delegate", "agent": name, "provider": provider_name, "model": model,
+          "execution_profile": execution["profile"],
           "effort": effort, "capability_tier": model_tier, "expected_processed_tokens": round(expected), "estimate_source": source,
           "observations": observed, "quota": quota_pressure,
           "funding": "subscription" if provider["kind"] in {"codex", "claude"} else "API balance; actual cost may be unknown"})
@@ -239,7 +274,7 @@ def plan(session_id: str, work_item: str = "main", operation: str = "read",
                   or (remaining is not None and remaining <= 20 and main_tokens > 3000))
   # The parent transcript does not expose its effort. Do not assume a frontier
   # parent is already using the high reasoning required by complex work.
-  if not reserve_main and desired_tier < 2 and (parent_tier is not None and parent_tier >= desired_tier
+  if not needs_environment and not reserve_main and desired_tier < 2 and (parent_tier is not None and parent_tier >= desired_tier
                            or parent_tier is None and desired_tier < 2):
     candidates.append(main)
   if not candidates:
@@ -258,6 +293,7 @@ def plan(session_id: str, work_item: str = "main", operation: str = "read",
   close = [c for c in candidates if c["expected_processed_tokens"] <= best_cost * 1.15]
   selected = min(close, key=lambda c: (-c["quota"]["surplus_priority"], c["expected_processed_tokens"]))
   result = {**selected, "id": "p" + uuid.uuid4().hex[:16], "session_id": session_id, "task_id": task["id"],
+            "requirements": capabilities.normalize(requirements),
             "work_item": work_item, "complexity": task["complexity"], "category": task["category"],
             "created_at": time.time(), "operation": operation,
             "reason": "Subtask capability and effort first, then expected work and quota headroom",
@@ -290,3 +326,10 @@ def validate_locked(task: dict[str, Any], job: dict[str, Any], plan_id: str = ""
     classification_matches = all(job.get(k) == plan[k] for k in ("complexity", "category") if k in plan)
     if plan["action"] != "delegate" or actual != expected or not classification_matches:
       raise ValueError("Dispatch does not match this session/task/model/effort plan")
+    execution = job.get("execution_environment") or {}
+    if "requirements" in plan:
+      if plan["requirements"] != execution.get("requirements") or plan.get("execution_profile") != execution.get("profile"):
+        raise ValueError("Dispatch execution requirements/profile differ from this plan; obtain a fresh plan")
+    elif execution.get("profile") not in {None, "sandboxed", "file-tools"} or any(
+        (execution.get("requirements") or {}).get(k) for k in ("gpu", "ssh", "network")):
+      raise ValueError("Plan predates execution requirements; obtain a fresh plan")
