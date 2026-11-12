@@ -103,6 +103,7 @@ class HistoryTests(unittest.TestCase):
       proc.stdout.close()
 
   def test_legacy_delivery_archives_and_retries_pending_history(self) -> None:
+    st.update_job("jfixture", result="fixture")  # Match the exact text delivered by the legacy server.
     response = {**self.value, "result": "fixture"}
     payload = {"session_id": "s", "hook_event_name": "PostToolUse",
                "tool_name": "mcp__x__delegate_job",

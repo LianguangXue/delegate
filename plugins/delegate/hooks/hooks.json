@@ -33,7 +33,7 @@
         ]
       },
       {
-        "matcher": "mcp__.*delegate_(run|job)",
+        "matcher": "mcp__.*delegate_(run|job|loop)",
         "hooks": [
           {
             "type": "command",

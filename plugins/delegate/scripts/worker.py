@@ -25,6 +25,8 @@ import attempts as at
 import workspaces
 import delivery_check
 import capabilities
+import input_contract
+import persistent_tasks
 
 ACCEPTANCE_POLICY = (
   "ACCEPTANCE INTEGRITY\n"
@@ -106,14 +108,24 @@ def packet(value: dict[str, Any]) -> str:
 
 def environment_brief(value: dict[str, Any]) -> str:
   """State actual backend limits and checkpoint/wait expectations without guessing project requirements."""
+  snapshot = value.get("source_snapshot") or {}
+  inputs = ("SOURCE INPUTS: selected repository-root-relative drafts were copied at launch: " +
+    json.dumps([r["path"] for r in snapshot.get("files", [])]) +
+    ". Other uncommitted edits were not copied. Compare against these inherited inputs; do not discard them. "
+    "A scoped authorized commit may include inherited edits only within approved commit_paths.\n") if snapshot else ""
+  if value.get("required_files") or value.get("output_files"):
+    inputs += ("FILE CONTRACT: " + json.dumps({"required_files": value.get("required_files", []),
+      "output_files": value.get("output_files", [])}) +
+      ". Relative paths refer to this worker's actual cwd and selected draft copies. Use these input paths; "
+      "original source paths are not a writable target. Preserve the original acceptance and report conflicts.\n")
   if value["provider"].get("kind", "codex") != "codex":
-    return "RUNTIME: scoped file tools only; no shell, SSH, database access or live steering. Report blocked checks."
+    return inputs + "RUNTIME: scoped file tools only; no shell, SSH, database access or live steering. Report blocked checks."
   execution = capabilities.from_job(value)
   waiting = ("Use delegate_wait(path=completion_file) or delegate_wait(pid=owned_pid) instead of repeated short polling/model rounds. "
     "The wait itself uses no inference; process exit/file existence still requires result validation. "
     if value.get("worker_wait_supported", not bool(value.get("thread_id"))) else
     "This legacy resumed thread has no delegate_wait tool; ask the parent to supervise long waits rather than repeatedly polling. ")
-  return ("RUNTIME: approval=never; execution profile=" + execution["profile"] +
+  return (inputs + "RUNTIME: approval=never; execution profile=" + execution["profile"] +
     "; sandbox_mode=" + str(execution["sandbox_mode"]) + "; networkAccess=" + str(execution["network_access"]) +
     "; filesystem isolation=" + str(execution["filesystem_isolation"]) + "; requirements_declared=" + str(execution["declared"]) + ". Requirements=" +
     json.dumps(execution["requirements"]) + ". GPU devices must already be allocated; CUDA_VISIBLE_DEVICES is a hint, "
@@ -176,6 +188,14 @@ def codex_worker(value: dict[str, Any], prompt: str) -> dict[str, Any]:
                 "timed_out" if current.get("runtime_stop_reason") == "timed_out" else "failed",
                 "error": execution["preflight"].get("reason", "Required capability preflight did not pass")}
       prompt += "\n\nLAUNCH PREFLIGHT (point-in-time, no reservation/auth/framework guarantee)\n" + json.dumps(execution["preflight"])
+    if value.get("required_files") or value.get("output_files"):
+      st.update_job(job_id, phase="file-access-preflight", input_access={"status": "pending", "inference_calls": 0})
+      try:
+        report = input_contract.preflight(rpc, value, capabilities.policy(value))
+      except (ValueError, RuntimeError) as exc:
+        st.update_job(job_id, input_access={"status": "blocked", "error": str(exc), "inference_calls": 0})
+        return {"status": "failed", "error": str(exc)}
+      st.update_job(job_id, input_access=report)
     account = rpc.call("account/read", {"refreshToken": False}).get("account")
     if not account or account.get("type") != "chatgpt":
       raise ValueError("ChatGPT authentication required; paid API fallback is disabled")
@@ -202,6 +222,7 @@ def codex_worker(value: dict[str, Any], prompt: str) -> dict[str, Any]:
     st.update_job(job_id, phase="turn/start")
     policy = capabilities.policy(value)
     # Mark before sending: a lost response can still represent a billable request.
+    persistent_tasks.check_child_launch(st.job(job_id))
     st.update_job(job_id, inference_state="attempted", inference_attempted_at=time.time())
     response = rpc.call("turn/start", {"threadId": thread_id, "model": value["model"],
       "effort": value["effort"], "cwd": value["cwd"], "approvalPolicy": "never", "sandboxPolicy": policy,
@@ -370,6 +391,13 @@ def claude_command(value: dict[str, Any]) -> tuple[list[str], dict[str, str]]:
 def claude_worker(value: dict[str, Any], prompt: str) -> dict[str, Any]:
   """Execute a bounded file-tool worker; retain its session ID for follow-up."""
   job_id = value["id"]
+  try:
+    report = input_contract.check(value["provider"], value["role"]["workspace"], value["cwd"],
+      value.get("required_files", []), value.get("output_files", []), probe=True)
+  except ValueError as exc:
+    st.update_job(job_id, input_access={"status": "blocked", "error": str(exc), "inference_calls": 0})
+    return {"status": "failed", "error": str(exc)}
+  st.update_job(job_id, input_access=report)
   import cli_history
   cli_history.restore(value)
   command, env = claude_command(value)
@@ -383,6 +411,7 @@ def claude_worker(value: dict[str, Any], prompt: str) -> dict[str, Any]:
   with tempfile.TemporaryFile(mode="w+") as output, tempfile.TemporaryFile(mode="w+") as error, tempfile.TemporaryFile(mode="w+") as input_file:
     input_file.write(prompt)
     input_file.seek(0)
+    persistent_tasks.check_child_launch(st.job(job_id))
     st.update_job(job_id, backend_starting=True, inference_state="attempted", inference_attempted_at=time.time())
     try:
       proc = subprocess.Popen(command, cwd=value["cwd"], env=env, stdin=input_file,
@@ -451,6 +480,7 @@ def main(job_id: str) -> None:
     value = st.job(job_id)
     st.update_job(job_id, inference_state="not_started", phase="runtime-preflight")
     runtime_image.require_worker(value, Path(__file__).resolve().parent)
+    persistent_tasks.check_child_launch(value)
     runtime_verified = True
     if value["cancel_requested"]:
       outcome = {"status": "cancelled"}
@@ -477,6 +507,9 @@ def main(job_id: str) -> None:
   except Exception as exc:
     reason = st.job(job_id).get("runtime_stop_reason")
     outcome = {"status": "timed_out" if reason == "timed_out" else "failed", "error": str(exc)}
+    if str(exc).startswith("Write delegation requires a clean source repository"):
+      st.update_job(job_id, recovery={"action": "select_source_inputs_or_return_report_text",
+        "note": "No model was started. Select exact draft paths with source_inputs for a builder, or use a read-only reviewer and return the report as text. Do not commit, stash or discard source changes just to dispatch."})
   finally:
     current = st.job(job_id)
     if runtime_verified:
@@ -494,9 +527,12 @@ def main(job_id: str) -> None:
     if not runtime_verified:
       # A legacy parent can copy a previous thread ID into a new receipt. Never
       # archive it or start cleanup backends when this worker rejected provenance.
-      st.update_job(job_id, **outcome, finished_at=time.time(), recovery={"action": "use_current_cli_or_new_session",
+      recovery = {"action": "use_current_cli_or_new_session",
         "command": "delegate-agent call", "session_id": current["session_id"],
-        "note": "Same session/task state and current authorization checks; no automatic replay"})
+        "note": "Same session/task state and current authorization checks; no automatic replay"}
+      if current.get("loop_id"):
+        recovery.update(action="inspect_persistent_task", loop_id=current["loop_id"])
+      st.update_job(job_id, **outcome, finished_at=time.time(), recovery=recovery)
     elif current.get("backend_starting") or group_running(current.get("backend_identity")):
       st.update_job(job_id, status="orphaned", error="Backend cleanup is unconfirmed; inspect before resuming")
     else:

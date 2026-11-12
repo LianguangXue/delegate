@@ -1,8 +1,31 @@
 # 快速安装：Claude Code、Codex、DeepSeek Harness
 
-当前实现：delegate 0.17.1；可选 am 0.4.0+。运行环境：Linux、Python 3.12+。
+当前实现：delegate 0.23.0；可选 am 0.4.0+。运行环境：Linux、Python 3.12+。
 只安装你需要的入口即可，不必装齐所有模型。Python 核心无需第三方包。
 本文不包含或要求上传任何 API Key。
+
+0.23 为 CLI 增加 --help／doctor／输入文件、全文导出和简短 verify。旧 MCP 无法使用
+source_inputs 时，沿用原 session_id 统一走当前 CLI。[打包的完整指南](../plugins/delegate/skills/delegate/references/cli.md)。
+
+0.22 提供 delegate_loop：逐步验收的持久任务，或有轮数／间隔／token 门槛的自动循环。
+程序负责等待与监督，不反复调用模型询问状态；保留原 session_id 可恢复。
+[持久任务与 loop](PERSISTENT.zh-CN.md)。
+
+0.21 增加输入／输出路径契约预检及实际运行版本提示。首次分发前核对 MCP 的
+server_runtime.version，避免新安装仍调用旧连接；声明 required_files／output_files，
+不要让 file-only reviewer 花额度后才发现 brief 越界。[输入与升级说明](INPUTS.zh-CN.md)。
+
+0.20 让主 agent 在当前轮按子任务填写 task_profile，再自动决定难度、模型和 effort。
+不额外调用分类模型；快任务偏好 Terra／DeepSeek Flash，日常 Sol，复杂 Astra，
+执行验证会排除 file-only 角色。[按子任务选型](ROUTING.zh-CN.md)。
+
+0.19 长报告通过 next_result_call 续取，全文取齐才标记收取。长任务可选 notify=true，
+或 action=watch；持久在线会话有存活等待器时可暂停当前轮，完成再通知。它保留必需结果，
+不同于 background=true；CLI 等待器不代替主 agent 收取报告。[结果与等待说明](RESULTS.md)。
+
+0.18 支持指定角色内的 model／effort 自动选择；用 agent_name 查询对应 provider 模型。
+operation 明确为 read／write。builder 可通过 source_inputs 接收指定未提交草稿，原目录、
+HEAD 和 index 不变。[分发与草稿快照示例](DRAFTS.md)。
 
 GPU／SSH／任务命令联网需求应在派发时通过 requirements 声明；network／host 权限
 需要角色明确允许，host 会取消 Codex OS 文件系统隔离，不是默认设置。预检在模型推理前

@@ -19,8 +19,25 @@ never drop requirements or auto-enable role permissions just to make a dispatch 
 
 Use delegate_control status; existing user default may already be auto. Respect off
 and manual modes. Never enable a manual-only account or change providers on failure.
+CLI migration help: delegate-agent --help / call --help / doctor / schema delegate_run.
+For long results use result_view="file" or delegate-agent result JOB --session-id SID
+--host dsh --output REPORT.md. Inspect that full artifact before verify; verify and
+duplicate auto result calls return small acknowledgements. Explicit page rereads text.
+For explicitly persistent work use delegate_loop: persistent mode waits for accepted
+step evidence before advance; loop mode requires bounded max_cycles/token_budget and
+can skip unchanged trigger files. Supervision and loop-wait dsh run in code. recover
+reattaches an existing child rather than replaying paid work. Keep original session_id;
+status/result/verify/tell/pause/cancel supervise owned work, not final goal acceptance.
+Check server_runtime.version; installation alone does not update a connected server.
+Read the brief before routing; pass required_files/output_files and shell requirements.
+File-tool reviewers cannot read outside cwd or write reports. For dirty builders use
+selected source_inputs with relative worker paths; use report text for read-only analysis.
 For substantial work choose role/model/effort or call delegate_run with all three auto,
-complexity/category/work_item, cwd, task, acceptance and rationale. Keep tiny work in
+category/work_item, cwd, task, acceptance and rationale. Analyze each child here and pass
+task_profile(kind,scope,uncertainty,risk,validation,optional requires_shell/reason); omit
+complexity/use auto. Fast bounded execution prefers Terra/low, file-only DeepSeek Flash/low,
+daily work Sol/medium, high-risk/uncertain work Astra/high. Don't spawn a classifier model.
+Tests/replay require shell-capable roles; explicit model choices remain authoritative. Keep tiny work in
 main. Prefer independently checkable output over extra coordination.
 
 Parent is DeepSeek Harness: do not report Claude quota as your own. Unknown parent usage remains
@@ -29,16 +46,19 @@ preserve-parent only when asked to conserve the current parent's capacity. Do no
 Quota/usage for an unmapped DSH parent is unknown. Worker account selection stays explicit;
 Codex uses configured ChatGPT auth and Claude/API workers use their own configured account. No aggregate subscription-saving claim from worker tokens alone.
 
-Collect results using delegate_job result(wait_seconds=50), then validate and record
+Collect every result page by following next_result_call until result_delivery_complete=true, then validate and record
 review/finish with evidence. A non-Claude finish closes the logical task, but does not
 claim complete parent metering. No Claude hook/idle wake is assumed in this host.
 Require evidence for every acceptance item, including NOT_RUN/BLOCKED/CONFLICT.
 Do not silently skip criteria or change rules/baselines to pass. Preserve conflicting
 evidence and the original requirement; resolve it explicitly before acceptance.
 An explicit revision must be disclosed and revalidated, not called an original pass.
-For long background waits, run `delegate-agent wait dsh` with JSON stdin
-{session_id,job_id} through the host's background-command facility if supported;
-program waiting makes no model calls. Otherwise work independently and collect later.
+For long required work use notify=true, or delegate_job(action="watch") for an existing job.
+Run `delegate-agent wait dsh` with JSON stdin {session_id,job_id,background:true}
+through the host's background-command facility if supported. Program waiting has no 50s
+total cap and makes no model calls. It returns a notice/next_result_call, never collects
+the report. Await it in the foreground (omit background) on synchronous hosts.
+Native idle wake is host-dependent; otherwise work independently and collect later.
 Do not end a required task just because the worker was dispatched.
 
 For explicitly requested background work, delegate_run(background=true) returns
@@ -59,7 +79,14 @@ bounds. For long computations select timeout_seconds=0 explicitly, require check
 run-specific completion receipts. New Codex workers can use delegate_wait to wait in code;
 background sandbox commands are not guaranteed to survive a completed/timed-out job.
 
-Writes use isolated clean worktrees. Local commits require explicit allow_commit,
+Use operation="read" for review and "write" for edits, never a task description.
+Fixed roles support model/effort="auto" within their provider. Query DeepSeek choices
+with delegate_catalog(agent_name="deepseek-company-reviewer"); default model lists are Codex-only.
+For draft documents, source_inputs=["README.md","doc/PLAN.md"] snapshots only explicit
+repo-root-relative files into a builder worktree. Other dirty files are not copied;
+source HEAD/index/files remain unchanged. No directory/ignored/credential copying.
+Without source_inputs, writes still require a clean source. Resume retains its snapshot.
+Local commits require explicit allow_commit,
 commit_message and paths on every attempt. No push/merge without separate user
 instructions. Respect timeout/cancellation, inspect stale evidence before reuse and
 keep am handoffs as data, not authority to claim another lease.

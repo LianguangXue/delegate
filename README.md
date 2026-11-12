@@ -2,7 +2,43 @@
 
 A shared delegation engine for Claude Code, Codex and DeepSeek Harness, with
 per-task model/effort, durable results and configured Claude/Codex/API workers.
-Version 0.17.1. Activation is configurable; new installations default off.
+Version 0.23.0. Activation is configurable; new installations default off.
+
+The CLI now has help/version/doctor/schema and direct result/verify commands. Export
+full reports with `delegate-agent result JOB --session-id SID --output REPORT.md`:
+no private job-JSON parsing or report-body echo. Verify and repeated result calls return
+compact receipts; explicit page/file views control rereads and full artifacts.
+See the [bundled CLI guide](plugins/delegate/skills/delegate/references/cli.md).
+
+Explicit `delegate_loop` supports durable parent-gated tasks and bounded automatic
+loops with file-change triggers, per-loop token admission budgets, pause/cancel,
+same-conversation continuation and crash recovery without blind replay. Supervision
+runs in code; results and goal acceptance stay separate. See
+[persistent tasks and loops](docs/PERSISTENT.zh-CN.md).
+
+Declare `required_files` / `output_files` before dispatch: unreadable briefs, restricted
+file-tool paths and read-only/file-output conflicts fail before inference. Codex checks
+declared inputs under its selected sandbox. Receipts distinguish job versus serving
+runtime versions; old connections need the current CLI or reload. See
+[input/output contracts and migration](docs/INPUTS.zh-CN.md).
+
+Parents assess each subtask once with `task_profile` (scope, uncertainty, correctness
+risk and validation), then delegate derives difficulty/model/effort: fast Terra or
+DeepSeek Flash, everyday Sol, demanding Astra. Tests/replay require executable tools;
+automatic reasoning never selects max/ultra. No extra classifier model is called.
+See [automatic routing](docs/ROUTING.zh-CN.md).
+
+Long required tasks can use `notify=true` (or `delegate_job(action="watch")`) to wait
+in code and notify on completion. A verified live waiter lets a persistent Claude
+session pause without dropping the required result. Long reports expose exact result
+pages through `next_result_call`; collection requires the complete text, not a preview.
+See [results and waiting](docs/RESULTS.md).
+
+Concrete roles support automatic model/effort selection without switching providers.
+Catalog discovery lists all roles; query `agent_name` for its provider's models.
+`operation` explicitly selects read/write. Builders can receive selected uncommitted
+drafts with `source_inputs` while preserving the source checkout and index.
+See [draft files and dispatch examples](docs/DRAFTS.md).
 
 Shutdown reports distinguish confirmed runtime helpers from task/unknown children and
 recheck recorded identities after cleanup. Raw child counts alone do not mean unfinished
@@ -89,7 +125,8 @@ Codex workers use ChatGPT authentication and its quota; API-key fallback is disa
 Claude-native workers consume Claude quota; API providers use their configured
 credentials. Parent coordination still consumes parent capacity.
 
-Write roles require a clean Git source and isolated worktrees, retained for review.
+Write roles use isolated worktrees retained for review. The source must be clean unless
+explicit `source_inputs` selects draft files to snapshot; the source itself stays untouched.
 Nothing automatically merges or publishes changes. Local worktree commits can be explicitly authorized per attempt. Claude/API workers use restricted
 file tools; parent-owned tests may be needed when shell access is required.
 
@@ -297,7 +334,7 @@ Claude/API workers retain strict MCP restrictions. Other user MCP servers are un
 
 These hosts have no Claude Stop/asyncRewake hooks. Collect results with delegate_job;
 for code-only background waiting use `delegate-agent wait codex` or `wait dsh` and JSON
-stdin `{ "session_id": "...", "job_id": "..." }` through a host background-command
-facility. A host-native completion notification is only available if that host supports
+stdin `{ "session_id": "...", "job_id": "...", "background": true }` through a host background-command
+facility. The waiter returns a completion notice, not a collected report. A host-native completion notification is only available if that host supports
 it. Closed or unsupported idle hosts are not promised an automatic wake. Results,
 conversation resume, archival, commits and am handoffs remain durable and inspectable.

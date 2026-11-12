@@ -27,16 +27,28 @@ import runtime_image
 import attempts as at
 import math
 import capabilities
+import source_inputs as drafts
+import result_delivery
+import completion
+import routing_policy as policy
+import input_contract
+import persistent_tasks
 
 
 
-def catalog(provider_name: str = "codex", refresh: bool = False) -> dict[str, Any]:
+def catalog(provider_name: str = "codex", refresh: bool = False, agent_name: str = "") -> dict[str, Any]:
   """Discover role names alongside each provider's model and effort catalog."""
-  value = _catalog(provider_name, refresh)
   cfg = st.config()
-  return {**value, "agents": [{"name": name, **role} for name, role in cfg["agents"].items()
-                              if role["provider"] == provider_name],
-          "configured_providers": [{"name": name, "enabled": p["enabled"]} for name, p in cfg["providers"].items()],
+  if agent_name:
+    if agent_name not in cfg["agents"]:
+      raise ValueError("Unknown agent_name; catalog agents lists exact configured role names")
+    provider_name = cfg["agents"][agent_name]["provider"]
+  value = _catalog(provider_name, refresh)
+  agents = [{"name": name, **role} for name, role in cfg["agents"].items()]
+  return {**value, "agents": agents, "selected_provider_agents": [r for r in agents if r["provider"] == provider_name],
+          "catalog_scope": "models/efforts belong to the selected provider; agents lists all configured roles",
+          "configured_providers": [{"name": name, "enabled": p["enabled"],
+            "models": p.get("models", []), "efforts": p.get("efforts", [])} for name, p in cfg["providers"].items()],
           "timeout_seconds": runtime.bounds(cfg["max_timeout_seconds"])}
 
 
@@ -135,6 +147,7 @@ def control(session_id: str, action: str = "status", agents: list[str] | None = 
     state = st.session(session_id)
     if action != "status":
       state["mode"] = "auto" if action == "on" else action
+      state["mode_revision"] = state.get("mode_revision", 0) + 1
       if agents is not None:
         state["agents"] = agents
       if strategy is not None:
@@ -142,12 +155,16 @@ def control(session_id: str, action: str = "status", agents: list[str] | None = 
       st.save_session(session_id, state)
   return {"session_id": session_id, **state, "configured_agents": cfg["agents"],
           "server_runtime": {"scripts": str(Path(__file__).resolve().parent),
+            "version": runtime_image.VERSION,
             "frozen": (Path(__file__).resolve().parent / "runtime-image.json").is_file(),
             "legacy_session_fallback": "delegate-agent call with JSON name/arguments and the same session_id"},
           "worktree_timeout_seconds": cfg.get("worktree_timeout_seconds", 600),
           "timeout_seconds": runtime.bounds(cfg["max_timeout_seconds"]),
           "execution_profiles": {"default": "sandboxed", "available": sorted(capabilities.PROFILES),
             "authorization": "Per-role execution_profiles; host requires explicit selection and a worktree role. No automatic escalation."},
+          "model_policy": {"preferences": policy.PREFERENCES, "max_auto_effort": policy.MAX_AUTO_EFFORT,
+            "assessment": "Parent reasons once using task_profile; no classifier model call. Explicit model/effort remain authoritative."},
+          "persistent_tasks": state.get("loops", []),
           "routing": ({"mode":"host-aware planning", "parent_provider":state.get("parent_provider") or "unknown"}
             if state.get("host_kind") in {"codex", "dsh"} else budget.recommendation(session_id)),
           "configuration": str(st.root() / "config.json"), "default_for_new_sessions": cfg.get("default_mode", "off")}
@@ -295,8 +312,13 @@ def summary(value: dict[str, Any], result: bool = False) -> dict[str, Any]:
   fields = ("id", "session_id", "agent", "provider_name", "model", "effort", "rationale", "status",
             "task_id", "work_item", "plan_id", "complexity", "category",
             "created_at", "finished_at", "cwd", "source_cwd", "thread_id", "turn_id", "error", "result",
-            "usage", "usage_delta", "model_usage", "acceptance", "review", "review_evidence", "messages", "last_event", "resume_job", "cancel_requested", "codex_session", "cli_session", "allow_commit", "git_commit", "runtime_image", "timeout_warning", "workspace_setup", "recovery", "await_completion", "delivery_check", "execution_environment")
+            "usage", "usage_delta", "model_usage", "acceptance", "review", "review_evidence", "messages", "last_event", "resume_job", "cancel_requested", "codex_session", "cli_session", "allow_commit", "git_commit", "runtime_image", "timeout_warning", "workspace_setup", "recovery", "await_completion", "delivery_check", "execution_environment", "selection", "source_inputs", "source_snapshot", "task_profile", "task_assessment")
   output = {field: value[field] for field in fields if field in value and (field != "result" or result)}
+  output["job_runtime_version"] = runtime_image.job_version(value)
+  output["server_runtime_version"] = runtime_image.VERSION
+  for field in ("required_files", "output_files", "input_access"):
+    if field in value:
+      output[field] = value[field]
   if value.get("delivery_check"):
     report = value["delivery_check"]
     output["delivery_check"] = {k: v for k, v in report.items() if k != "findings"}
@@ -316,6 +338,9 @@ def summary(value: dict[str, Any], result: bool = False) -> dict[str, Any]:
     output["shutdown_observation"]["detail_action"] = "delegate_job inspect"
   output["runtime"] = runtime.observe(value)
   output["background"] = not value.get("await_completion", True)
+  if value.get("completion_mode") == "notify" or value.get("completion_waiters"):
+    output["completion_mode"] = value.get("completion_mode", "wait")
+    output["completion"] = completion.describe(value)
   output["attempt"] = at.describe(value)
   output["record_path"] = str(st.root() / ("job-" + value["id"] + ".json"))
   return output
@@ -344,14 +369,20 @@ def run(session_id: str, agent: str, model: str, effort: str, task: str, accepta
         await_completion: bool = True, allow_commit: bool = False,
         commit_message: str = "", commit_paths: list[str] | None = None,
         background: bool = False, requirements: dict[str, Any] | None = None,
-        execution_profile: str = "auto") -> dict[str, Any]:
+        execution_profile: str = "auto", source_inputs: list[str] | None = None,
+        notify: bool = False, task_profile: dict[str, Any] | None = None,
+        required_files: list[str] | None = None, output_files: list[str] | None = None) -> dict[str, Any]:
   """Dispatch under the resume guard, then wait without blocking worker archival."""
   if type(wait_seconds) is not int or not 0 <= wait_seconds <= 50:
     raise ValueError("wait_seconds must be 0..50")
   if type(background) is not bool:
     raise ValueError("background must be a boolean")
+  if type(notify) is not bool:
+    raise ValueError("notify must be a boolean")
   if background:
     await_completion = False
+    wait_seconds = 0
+  if notify:
     wait_seconds = 0
   arguments = locals().copy()
   arguments.pop("background")
@@ -369,9 +400,29 @@ def _dispatch(session_id: str, agent: str, model: str, effort: str, task: str, a
         plan_id: str = "", category: str = "", complexity: str = "", operation: str = "read",
         estimated_main_tokens: int = 0, await_completion: bool = True, allow_commit: bool = False,
         commit_message: str = "", commit_paths: list[str] | None = None,
-        requirements: dict[str, Any] | None = None, execution_profile: str = "auto") -> dict[str, Any]:
+        requirements: dict[str, Any] | None = None, execution_profile: str = "auto",
+        source_inputs: list[str] | None = None, notify: bool = False,
+        task_profile: dict[str, Any] | None = None, required_files: list[str] | None = None,
+        output_files: list[str] | None = None) -> dict[str, Any]:
   """Validate authorization and selection, then start a detached bounded worker."""
   st.key(session_id)
+  launch = persistent_tasks.context(session_id)
+  operation = optimizer.normalize_operation(operation)
+  input_paths = drafts.validate(source_inputs)
+  profile_supplied = task_profile is not None
+  task_profile = policy.normalize(task_profile)
+  required_declared, output_declared = required_files is not None, output_files is not None
+  required_files = input_contract.normalize(required_files, "required_files")
+  output_files = input_contract.normalize(output_files, "output_files")
+  if any(not isinstance(s, str) for s in (task, context, acceptance)) or len(task) + len(context) + len(acceptance) > 100000:
+    raise ValueError("Task packet must be text up to100000 characters; pass focused context")
+  if not required_declared:
+    required_files = input_contract.normalize(input_contract.discover(task + "\n" + context + "\n" + acceptance), "required_files")
+  workdir = Path(cwd).resolve(strict=True)
+  if not workdir.is_dir():
+    raise ValueError("cwd must be a directory")
+  if complexity == "auto":
+    complexity = ""
   if type(one_shot) is not bool or type(await_completion) is not bool:
     raise ValueError("one_shot and await_completion must be booleans")
   cfg = st.config()
@@ -380,6 +431,17 @@ def _dispatch(session_id: str, agent: str, model: str, effort: str, task: str, a
     raise ValueError("Resume must use the same session")
   if previous and agent != "auto" and previous["agent"] != agent:
     raise ValueError("Resume must use the same session and role")
+  if previous and task_profile is None:
+    task_profile = previous.get("task_profile")
+  if previous:
+    if not required_declared:
+      required_files = input_contract.normalize(previous.get("required_files", []) + required_files, "required_files")
+    if not output_declared:
+      output_files = input_contract.normalize(previous.get("output_files"), "output_files")
+    old_inputs = previous.get("source_inputs", [])
+    if source_inputs is not None and input_paths != old_inputs:
+      raise ValueError("Resume preserves its existing source_inputs snapshot; use a fresh task to select new inputs")
+    input_paths = old_inputs
   requirements_declared = requirements is not None
   if previous:
     prior_execution = capabilities.from_job(previous)
@@ -392,6 +454,8 @@ def _dispatch(session_id: str, agent: str, model: str, effort: str, task: str, a
   if complexity and complexity not in {"trivial", "simple", "standard", "complex"}:
     raise ValueError("Invalid complexity")
   if agent == "auto":
+    if input_paths and operation != "write":
+      raise ValueError("source_inputs requires operation='write' for automatic builder selection")
     if model != "auto" or effort != "auto" or plan_id:
       raise ValueError("Automatic selection uses agent/model/effort=auto without a preselected plan")
     if st.session(session_id)["mode"] != "auto":
@@ -399,7 +463,7 @@ def _dispatch(session_id: str, agent: str, model: str, effort: str, task: str, a
     if complexity and complexity not in {"trivial", "simple", "standard", "complex"}:
       raise ValueError("Invalid complexity")
     state = st.session(session_id)
-    root_task = accounting.load(state["active_task"]) if state.get("active_task") else accounting.begin(session_id)
+    root_task = persistent_tasks.task_for(session_id) or (accounting.load(state["active_task"]) if state.get("active_task") else accounting.begin(session_id))
     with st.locked():
       root_task = accounting.load(root_task["id"])
       if not root_task["jobs"]:
@@ -407,7 +471,9 @@ def _dispatch(session_id: str, agent: str, model: str, effort: str, task: str, a
         accounting.save(root_task)
     work_item = work_item or (st.job(resume_job).get("work_item", "main") if resume_job else "main")
     decision = optimizer.plan(session_id, work_item, operation, estimated_main_tokens, len(context),
-                              complexity=complexity, category=category, requirements=requirements, execution_profile=execution_profile)
+                              complexity=complexity, category=category, requirements=requirements,
+                              execution_profile=execution_profile, task_profile=task_profile, cwd=str(workdir),
+                              required_files=required_files, output_files=output_files)
     if decision["action"] != "delegate":
       return decision
     agent, model, effort, plan_id = decision["agent"], decision["model"], decision["effort"], decision["id"]
@@ -417,6 +483,8 @@ def _dispatch(session_id: str, agent: str, model: str, effort: str, task: str, a
     names = [name for name, row in cfg["agents"].items() if row["enabled"]]
     raise ValueError("Agent is missing or disabled; enabled agent names: " + ", ".join(names) +
                      ". Use delegate_catalog(provider_name=...) for roles/models/efforts")
+  if input_paths and role["workspace"] != "worktree":
+    raise ValueError("source_inputs is for isolated worktree builders; read-only reviewers already see current source files")
   commits.validate(allow_commit, commit_message, commit_paths, role["workspace"])
   provider_name = role["provider"]
   provider = cfg["providers"][provider_name]
@@ -436,8 +504,47 @@ def _dispatch(session_id: str, agent: str, model: str, effort: str, task: str, a
       raise ValueError("Delegation is off/manual or this role is manual-only; explicit one-shot request required")
     if state["agents"] is not None and agent not in state["agents"]:
       raise ValueError("Agent is outside this session's allowed pool")
+    if launch and agent not in launch["authorized_agents"]:
+      raise ValueError("Agent is outside the persistent task's original pool")
 
   authorize(st.session(session_id))
+  selection_state = st.session(session_id)
+  selection_task = persistent_tasks.task_for(session_id) or (accounting.load(selection_state["active_task"]) if selection_state.get("active_task") else None)
+  item = work_item or (previous or {}).get("work_item", "main")
+  attempts = [st.job(j) for j in selection_task["jobs"] if st.job(j).get("work_item", "main") == item] if selection_task else []
+  last_attempt = next((j for j in reversed(attempts) if at.model_attempted(j)), None)
+  selection_plan = st.read("plan-" + st.key(plan_id) + ".json", {}) if plan_id else {}
+  if "required_files" in selection_plan:
+    expected_paths = {(workdir / name).resolve() for name in selection_plan["required_files"]}
+    current_paths = {(workdir / name).resolve() for name in required_files}
+    if ((required_declared and current_paths != expected_paths)
+        or (not required_declared and not current_paths <= expected_paths)):
+      raise ValueError("required_files differs from its plan; obtain a fresh plan")
+    if output_declared and output_files != selection_plan["output_files"]:
+      raise ValueError("output_files differs from its plan; obtain a fresh plan")
+    required_files, output_files = selection_plan["required_files"], selection_plan["output_files"]
+    if selection_plan["cwd"] and str(workdir) != selection_plan["cwd"]:
+      raise ValueError("cwd differs from its file-access plan; obtain a fresh plan")
+  elif selection_plan and (required_files or output_files):
+    raise ValueError("Plan predates file-access checks; obtain a fresh plan")
+  if selection_plan.get("assessment"):
+    assessment = selection_plan["assessment"]
+    if profile_supplied and task_profile != assessment["profile"]:
+      raise ValueError("task_profile differs from its plan; obtain a fresh plan")
+    if complexity and policy.LEVELS[complexity] > policy.LEVELS[assessment["complexity"]]:
+      raise ValueError("complexity exceeds its plan; obtain a fresh plan")
+    task_profile = assessment["profile"]
+  else:
+    if not profile_supplied and attempts and attempts[-1].get("task_profile") is not None:
+      task_profile = policy.normalize(attempts[-1]["task_profile"])
+    inherited = selection_plan.get("complexity") or (previous or {}).get("complexity") or (
+      attempts[-1].get("complexity") if attempts else None) or (selection_task or {}).get("complexity", "standard")
+    assessment = policy.assess(task_profile, complexity, inherited)
+  complexity = assessment["complexity"]
+  if assessment["requires_shell"] and provider["kind"] != "codex":
+    raise ValueError("Task assessment requires shell/tests/replay; this selected role has file tools only. Choose an execution role explicitly")
+  execution_cwd = previous["cwd"] if previous else str(workdir)
+  access = input_contract.check(provider, role["workspace"], execution_cwd, required_files, output_files)
   execution = capabilities.select(role, provider, requirements, execution_profile)
   if previous:
     old = capabilities.from_job(previous)
@@ -446,6 +553,14 @@ def _dispatch(session_id: str, agent: str, model: str, effort: str, task: str, a
       raise ValueError("Resume cannot change execution profile/resource requirements; create a new task with explicit handoff")
   if model_cooldown(provider_name, model):
     raise ValueError("Model is temporarily at capacity; wait for the 60-second cooldown or choose another allowed model")
+  selection = None
+  if model == "auto" or effort == "auto":
+    requested = {"model": model, "effort": effort}
+    model, effort = optimizer.role_pair(role, provider, catalog(provider_name), model, effort,
+                                        complexity, provider_name, last_attempt)
+    selection = {"requested": requested, "model": model, "effort": effort, "complexity": complexity,
+                 "model_family": policy.family(model), "assessment": assessment,
+                 "scope": "Selected role/provider only; capability tiers are heuristics"}
   choose(role, provider, provider_name, model, effort)
   quota_snapshot = quota(provider_name, session_id=session_id)
   if quota_snapshot.get("status") == "limited" and quota_snapshot.get("model") == model:
@@ -485,17 +600,23 @@ def _dispatch(session_id: str, agent: str, model: str, effort: str, task: str, a
   job_id = "j" + uuid.uuid4().hex[:16]
   image = runtime_image.freeze(Path(__file__).resolve().parent)
   parent_state = st.session(session_id)
-  parent_task = accounting.load(parent_state["active_task"]) if parent_state.get("active_task") else accounting.begin(session_id)
+  parent_task = persistent_tasks.task_for(session_id) or (accounting.load(parent_state["active_task"]) if parent_state.get("active_task") else accounting.begin(session_id))
   work_item = work_item or (previous.get("work_item", "main") if previous else "main")
   st.key(work_item)
   classification = st.read("plan-" + st.key(plan_id) + ".json", {}) if plan_id else {}
   job_complexity = complexity or classification.get("complexity") or (previous or {}).get("complexity") or parent_task["complexity"]
   job_category = category or classification.get("category") or (previous or {}).get("category") or parent_task["category"]
   value = {"execution_environment": execution, "runtime_image": image, "inference_state": "not_started", "worker_wait_supported": previous.get("worker_wait_supported", False) if previous else True,
+           "delegate_version": runtime_image.VERSION, "required_files": required_files, "output_files": output_files,
+           "input_access": access,
            "allow_commit": allow_commit, "commit_message": commit_message, "commit_paths": commit_paths,
            "worktree": previous.get("worktree") if previous else None, "complexity": job_complexity, "category": job_category[:80], "id": job_id, "session_id": session_id, "await_completion": await_completion, "agent": agent, "role": copy.deepcopy(role),
            "provider_name": provider_name, "provider": copy.deepcopy(provider), "model": model, "effort": effort,
            "task": task, "context": context, "acceptance": acceptance, "rationale": rationale,
+           "selection": selection,
+           "task_profile": task_profile, "task_assessment": assessment,
+           "completion_mode": "notify" if notify else "wait",
+           "source_inputs": input_paths, "source_snapshot": previous.get("source_snapshot") if previous else None,
            "source_cwd": str(workdir), "cwd": previous["cwd"] if previous else str(workdir),
            "timeout_seconds": timeout_seconds, "runtime_control_version": 1, "runtime_revision": 0,
            "runtime_ack_expected": True, "created_at": time.time(), "status": "queued",
@@ -504,6 +625,8 @@ def _dispatch(session_id: str, agent: str, model: str, effort: str, task: str, a
            "resume_job": resume_job, "thread_id": previous["thread_id"] if previous else None,
            "backend_config_dir": previous.get("backend_config_dir") if previous else None,
            "usage_before": usage_baseline}
+  if launch:
+    value.update(loop_id=launch["loop_id"], loop_cycle=launch["cycle"], loop_attempt=launch["attempt"], loop_launch_key=launch["key"])
   for active_id in st.read("active.json", []):
     reconcile(active_id)
   with st.locked():
@@ -518,6 +641,8 @@ def _dispatch(session_id: str, agent: str, model: str, effort: str, task: str, a
     if previous and any(st.job(j).get("thread_id") == previous["thread_id"] for j in active):
       raise ValueError("This backend thread already has an active job")
     optimizer.validate_locked(parent_task, value, plan_id)
+    if launch:
+      persistent_tasks.validate_launch_locked(launch, value)
     st.write("active.json", active)
     registration.commit_locked(value)
   try:
@@ -533,7 +658,9 @@ def _dispatch(session_id: str, agent: str, model: str, effort: str, task: str, a
 
 def jobs(session_id: str, action: str = "list", job_id: str = "", message: str = "",
          wait_seconds: int = 0, verdict: str = "", evidence: str = "", detail: bool = False,
-         timeout_seconds: int | None = None, extend_seconds: int | None = None) -> Any:
+         timeout_seconds: int | None = None, extend_seconds: int | None = None,
+         result_offset: int = 0, result_limit: int = result_delivery.DEFAULT_LIMIT,
+         result_sha256: str = "", result_view: str = "auto") -> Any:
   """List, inspect, interrupt, steer, or record parent verification of a task."""
   state = st.session(session_id)
   if action == "list":
@@ -541,6 +668,10 @@ def jobs(session_id: str, action: str = "list", job_id: str = "", message: str =
   value = reconcile(job_id)
   if value["session_id"] != session_id:
     raise ValueError("Job belongs to another session")
+  if action == "status":
+    return summary(value)
+  if action == "watch":
+    return summary(st.update_job(job_id, completion_mode="notify"))
   if action == "inspect":
     return {**summary(value), "inspection": runtime.inspect(value)}
   if action in {"runtime", "extend"}:
@@ -600,32 +731,41 @@ def jobs(session_id: str, action: str = "list", job_id: str = "", message: str =
     return summary(st.update_job(job_id, await_completion=False))
   if action == "archive":
     thread_cleanup.archive(job_id)
-    return summary(st.job(job_id), result=True)
+    return result_delivery.receipt(st.job(job_id))
   if action == "result":
-    if not 0 <= wait_seconds <= 50:
+    if result_view not in {"auto", "page", "summary", "file"}:
+      raise ValueError("result_view must be auto/page/summary/file; page explicitly rereads text, file exports the whole report")
+    result_delivery.validate(result_offset, result_limit, result_sha256)
+    if result_view == "file":
+      if result_offset or result_sha256:
+        raise ValueError("file view exports the full current result; omit paging arguments")
+    if type(wait_seconds) is not int or not 0 <= wait_seconds <= 50:
       raise ValueError("wait_seconds must be 0..50")
     deadline = time.monotonic() + wait_seconds
     while value["status"] in ACTIVE and value["status"] != "orphaned" and time.monotonic() < deadline:
       time.sleep(min(1, max(0, deadline - time.monotonic())))
       value = reconcile(job_id)
-    if value["status"] not in ACTIVE or value["status"] == "orphaned":
-      st.update_job(job_id, collected_at=time.time())
-    elif wait_seconds:
+    if value["status"] in ACTIVE - {"orphaned"} and wait_seconds:
       with st.locked():
         current = st.job(job_id)
         current["wait_count"] = current.get("wait_count", 0) + 1
         st.write("job-" + job_id + ".json", current)
+    if result_view == "file":
+      if value["status"] in ACTIVE - {"orphaned"}:
+        return result_delivery.receipt(value)
+      return result_delivery.artifact(session_id, job_id)
+    digest, ranges, complete = result_delivery.proof(value)
+    if result_view == "summary":
+      return result_delivery.receipt(value)
+    if result_view == "auto" and not result_offset and not result_sha256 and ranges:
+      return result_delivery.receipt(value, unchanged=True)
     result = summary(value, result=True)
     if not detail:
       usage = accounting.job_usage(value)
       result["observed_tokens"] = accounting.totals([usage]) if usage else None
       for field in ("usage", "usage_delta", "model_usage", "rationale", "acceptance", "messages"):
         result.pop(field, None)
-      text = result.get("result") or ""
-      if len(text) > 8000:
-        result["result"] = text[:8000]
-        result["result_truncated"] = True
-    return result
+    return result_delivery.page(value, result, result_offset, result_limit, result_sha256)
   if action == "cancel":
     if value["status"] == "orphaned":
       return summary(cancel_orphan(job_id))
@@ -647,5 +787,5 @@ def jobs(session_id: str, action: str = "list", job_id: str = "", message: str =
   if action == "verify":
     if value["status"] in ACTIVE or verdict not in {"accepted", "needs-work", "blocked"} or not evidence.strip():
       raise ValueError("Verify requires a finished job, verdict, and concrete evidence")
-    return summary(st.update_job(job_id, review=verdict, review_evidence=evidence), result=True)
+    return result_delivery.receipt(st.update_job(job_id, review=verdict, review_evidence=evidence))
   raise ValueError("Unknown job action")

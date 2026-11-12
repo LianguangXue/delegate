@@ -99,7 +99,13 @@ def prepare(value: dict[str, Any]) -> None:
   if value.get("allow_commit"):
     cwd = workspace(value)
     if git(cwd, "status", "--porcelain", "--untracked-files=normal"):
-      raise ValueError("Commit-enabled task requires a clean worktree; preserve earlier edits first")
+      import source_inputs
+      changed = set(git(cwd, "diff", "HEAD", "--name-only", "-z").split("\0")) | set(
+        git(cwd, "ls-files", "--others", "--exclude-standard", "-z").split("\0"))
+      expected = {r["path"] for r in (value.get("source_snapshot") or {}).get("files", [])}
+      if (not source_inputs.verify(value, cwd) or changed - {""} - expected
+          or git(cwd, "diff", "--cached", "--name-only")):
+        raise ValueError("Commit-enabled task requires clean or verified source_inputs-only worktree; preserve earlier edits")
     import storage as st
     st.update_job(value["id"], commit_base_head=git(cwd, "rev-parse", "HEAD"))
 

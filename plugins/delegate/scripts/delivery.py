@@ -23,4 +23,5 @@ def notice(job_id: str, force: bool = False) -> str:
     record.update(status="pending", last_attempt_at=now, attempts=record["attempts"] + 1)
     st.write(name, record)
     return (record["event_id"] + ": delegate job " + job_id + " has status " + job["status"] +
-            "; retrieve delegate_job result, inspect evidence and verify. A notice is not acceptance.")
+            "; retrieve delegate_job result and follow next_result_call until result_delivery_complete, "
+            "then inspect evidence and verify. A notice is not acceptance.")

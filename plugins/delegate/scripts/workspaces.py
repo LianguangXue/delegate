@@ -8,6 +8,7 @@ import subprocess
 import time
 
 import storage as st
+import source_inputs
 from lifecycle import identity, stop_owned, group_running
 
 DEFAULT_TIMEOUT = 600
@@ -151,9 +152,10 @@ def prepare(value: dict[str, Any]) -> str:
   job_id = value["id"]
   source = value["source_cwd"]
   top = Path(run(job_id, source, "rev-parse", "--show-toplevel")).resolve()
-  if run(job_id, str(top), "status", "--porcelain", "--untracked-files=normal"):
+  inputs = source_inputs.validate(value.get("source_inputs") or None)
+  if not inputs and run(job_id, str(top), "status", "--porcelain", "--untracked-files=normal"):
     raise ValueError("Write delegation requires a clean source repository. Preserve current changes first; "
-                     "or use a read-only agent to analyze the current dirty tree.")
+                     "or select exact source_inputs file paths to snapshot current drafts into an isolated worktree.")
   if "160000 " in run(job_id, str(top), "ls-files", "--stage"):
     raise ValueError("Choose the actual nested repository; automatic submodule checkout is not supported")
   target = st.root() / "worktrees" / job_id
@@ -164,6 +166,22 @@ def prepare(value: dict[str, Any]) -> str:
   if target.exists() or registered(job_id, str(top), target):
     raise ValueError("Workspace target already exists or is registered; preserve and inspect it")
   base = run(job_id, str(top), "rev-parse", "HEAD")
+  snapshot = None
+  if inputs:
+    if run(job_id, str(top), "ls-files", "--unmerged"):
+      raise ValueError("Resolve source index conflicts before taking source_inputs")
+    try:
+      ignored = run(job_id, str(top), "check-ignore", "--", *inputs)
+    except subprocess.CalledProcessError as exc:
+      if exc.returncode != 1:
+        raise ValueError("Could not validate source_inputs ignore rules; paths may cross symlinks or Git metadata is unavailable") from None
+    else:
+      if ignored:
+        raise ValueError("source_inputs cannot include ignored files; select reviewed source/document files")
+    raw = run(job_id, str(top), "--literal-pathspecs", "ls-tree", "-r", "--name-only", "-z", base, "--", *inputs)
+    snapshot = source_inputs.capture(value, top, base, set(raw.split("\0")))
+    if run(job_id, str(top), "rev-parse", "HEAD") != base:
+      raise ValueError("Source HEAD changed during snapshot capture; retry after the edit finishes")
   cwd = target / Path(source).resolve().relative_to(top)
   reason = "delegate-workspace-" + job_id
   st.update_job(job_id, worktree=str(target), base_commit=base)
@@ -186,6 +204,8 @@ def prepare(value: dict[str, Any]) -> str:
       if not verify(job_id, str(top), target, base):
         raise ValueError("Worktree checkout did not pass identity/HEAD/cleanliness validation")
     unlock(job_id, str(top), target)
+    if snapshot:
+      source_inputs.apply(value, target, snapshot)
     if not cwd.is_dir():
       raise ValueError("Original source subdirectory is missing in the prepared worktree")
     receipt(job_id, status="ready", lock_released=True)

@@ -11,6 +11,12 @@ Use the delegate MCP tools with this exact session ID. If unavailable, report th
 `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/delegate.py" call` with JSON (`name`, `arguments`) on stdin via
 quoted heredoc. Never interpolate task text or credentials into shell code.
 
+Before the first substantial dispatch, check the CONNECTED MCP delegate_control status
+server_runtime.version once. Installing a release does not replace that connection.
+If old/missing, use the installed delegate-agent call with the same session_id or a
+current session. A CLI version proves only the CLI, not the connected MCP. Never rerun
+an already accepted review merely to migrate its bookkeeping.
+
 If a plugin upgrade leaves an older MCP connected (legacy runtime identity errors,
 or old attempt-limit errors after only pre-inference failures), stop retrying that
 connection. Use the installed `delegate-agent call` with the SAME JSON name/arguments
@@ -18,11 +24,38 @@ and session_id for control/plan/run/result. This starts the current frozen servi
 keeps the original task state and authorization checks. A new session also works;
 `/reload-plugins` may defer MCP changes until then in non-terminal hosts. Never weaken
 runtime identity checks or increase max_attempts merely to bypass an upgrade failure.
+The current CLI is discoverable: delegate-agent --help, call --help, doctor and schema.
+For old connections use it consistently, including result and verify. Full report:
+delegate-agent result JOB --session-id SID --output REPORT.md. It returns a path/hash,
+not the report body. Input format and dirty-builder example are bundled in [CLI guide](references/cli.md).
 
 ## Controls
 
+Use delegate_loop only for user-requested persistent/ongoing work, never turn ordinary
+one-shot delegation into recurring inference. Prefer mode=persistent for complex goals:
+the controller retains conversation/workspace but stops after each step for result
+collection and actual accepted evidence before advance. mode=loop requires explicit
+bounded repetition, a positive observed-token budget and max_cycles; use trigger_file
+to avoid unchanged-input model calls. Do not invent an unbounded budget or silently
+enable manual-only accounts. Monitoring/status/loop-wait make no model calls.
+Use loop status/inspect/tell/pause/cancel/recover for supervision. pause lets the current
+step finish; cancel requests owned-child cancellation. retry keeps the same cycle/work_item.
+Limits are admission gates, not in-flight cost caps; unknown usage blocks more calls.
+Stop receipts/iteration limits are never goal acceptance. Parent must finish with evidence.
+Use run_spec.timeout_seconds=0 only when explicitly choosing an unbounded supervised
+single step; persistent state alone does not extend the ordinary worker timeout.
+See the repository docs/PERSISTENT.zh-CN.md for source versus workspace receipt paths.
+
 Before dispatch, declare the actual command-execution needs in requirements: gpu/ssh/network
 booleans, allocated gpu_devices strings, and ssh_targets/network_targets host+port objects.
+Read the referenced brief before routing, identify all required inputs and the expected
+deliverable, and pass required_files/output_files. File-tool reviewers are confined to cwd
+and cannot write a report. Use a focused containing cwd only when all inputs actually fit,
+or a shell-capable Codex reviewer returning report text. Python/commands require the shell
+profile signal. A dirty source builder needs selected source_inputs; file-tool builders
+must use cwd-relative input/task references for the future worktree, never source absolutes.
+Explicit required_files (including []) overrides conservative legacy path discovery; it
+does not expand permissions or claim every implicit dependency was checked.
 Reviewing GPU code or reading existing outputs alone does not require GPU access. Never guess
 GPU allocations or use reserved devices. Network targets are direct TCP probe endpoints;
 for proxies/jump hosts declare the reachable relay rather than assuming a direct final route.
@@ -40,7 +73,19 @@ If an old MCP schema rejects these fields, use the current fixed CLI with the SA
 - Explicit background work: pass `background=true` directly to delegate_run. It implies await_completion=false
   and returns immediately even if wait_seconds was supplied; no separate detach call is needed. Ordinary required
   work remains foreground-to-parent by default. This does not keep sandbox child computations alive after the worker ends.
+- For required multi-minute work, use `notify=true` instead: immediate receipt, still
+  await_completion=true. Existing jobs use delegate_job(action="watch"). In a persistent
+  Claude session the asyncRewake hook registers a leased watcher; only a live verified
+  watcher permits Stop to pause while the job runs. Completion still requires collection.
+  Inspect completion.watcher_active/stop_may_defer. If the hook is unavailable, run its
+  returned wait_command with wait_stdin through the host background-command facility.
+  Do not repeatedly poll result every 50s or spawn a model to watch. Single-shot/unknown
+  hosts keep the guard; a foreground managed waiter waits in code beyond 50s.
 - `models [provider]`: delegate_catalog. Models and efforts must be supported; roles can narrow the allowlist.
+  Default models are Codex-only; agents lists all roles. For DeepSeek use
+  delegate_catalog(agent_name="deepseek-company-reviewer") or its provider_name.
+  A fixed role supports model="auto" and/or effort="auto", selecting only within
+  that role/provider. Pass per-item complexity; explicit choices stay authoritative.
 - `quota`: delegate_quota for enabled providers, passing session_id. `budget`: delegate_budget for routing evidence.
   `budget claude <percent>` records ONLY an explicitly user-supplied remaining percentage, labelled and expiring.
 - `agents` / `providers`: delegate_configure(show). Before adding/editing, read [accounts](references/accounts.md).
@@ -105,10 +150,17 @@ Automatic mode is optional. Do not add an agent to a trivial task merely because
 Answer trivial tasks directly without planning or measurement tool calls. Local hooks still observe usage.
 For substantial independent work use ONE call:
 
-`delegate_run(agent="auto", model="auto", effort="auto", category=..., complexity=..., operation="read"|"write",
-work_item=..., wait_seconds=50, task=..., acceptance=..., rationale=..., cwd=..., context=...)`
+`delegate_run(agent="auto", model="auto", effort="auto", category=..., task_profile=..., operation="read"|"write",
+work_item=..., notify=true, task=..., acceptance=..., rationale=..., cwd=..., context=...)`
 
-Pass complexity and category for EACH work_item. They classify that subtask, not the whole parent task.
+Before auto selection, reason in this turn about EACH work_item and provide task_profile:
+kind (lookup/documentation/mechanical/implementation/review/debugging/architecture/research),
+scope (bounded/cross-module/system), uncertainty/risk (low/medium/high), validation
+(inspection/tests/replay), optional requires_shell and a short reason. Do not delegate
+classification to another model, count keywords or copy the whole project's difficulty.
+Omit complexity or use auto to derive it; an explicit level is a minimum. A clear child
+of a complex project can still use the fast lane. Missing information stays conservative;
+ask for essential inputs rather than sending an ill-defined task to an expensive model.
 This classifies, plans, dispatches and waits. It may return main/wait/reuse/replan without starting a worker;
 that is a decision, not task completion. Use separate delegate_plan only when examining choices is useful.
 Explicit user model choices can use the explicit role/model/effort path. Do not silently override them.
@@ -116,9 +168,17 @@ Explicit user model choices can use the explicit role/model/effort path. Do not 
 Roles define responsibilities and permissions; model and effort vary per task. Prefer the least costly
 likely-successful choice, considering retries and parent overhead. Use these subtask boundaries:
 - trivial: tiny direct answer or one small lookup; keep it in main without a worker.
-- simple: bounded extraction, summaries, mechanical edits; prefer fast/low.
-- standard: ordinary implementation or review; prefer workhorse/medium.
-- complex: architecture, concurrency, subtle numerical correctness or difficult debugging; use frontier/high.
+- simple: bounded clear low-risk work; Terra/low for execution, DeepSeek Flash/low for file-only work.
+- standard: ordinary implementation or review; prefer Sol/medium.
+- complex: architecture/high uncertainty/high correctness risk; prefer Astra/high.
+
+Model families are workflow preferences, not measured cross-provider rankings. Respect
+catalog support, quotas, role/account allowlists and actual tool requirements. File-tool
+providers cannot run tests/replays; do not turn execution into extra parent work by routing
+it to a file-only worker. Quota can choose among allowed equivalent candidates or eligible
+fallbacks; never enable manual-only accounts. Automatic effort is capped at xhigh and never
+selects max/ultra. Infrastructure/transport failures do not alone increase effort; a failed
+acceptance can. Explicit user model/effort choices remain authoritative.
 
 Decompose mixed work: a complex project can have independent simple lookups, standard implementation,
 and complex design/validation work_items. Classify each and dispatch separately when it saves work;
@@ -150,9 +210,16 @@ the revision and revalidate; do not report it as passing the original requiremen
 `delegate_task(action="finish", accepted_jobs=[...], verdict="accepted"|"needs-work"|"blocked", evidence=...)`
 
 Only include child IDs whose results you actually checked. Stop captures the parent's final response locally
-without another model turn. For required results, wait up to 50 seconds per result call or work independently; continue waiting if still active. Use await_completion=false or delegate_job(action="detach") only when the user explicitly requests a background task.
-Results are compact; detail=true or the saved record supplies full output. Do not accept from a truncated
-summary when missing evidence matters.
+without another model turn. For required long results use completion notification/managed
+waiter instead of repeated 50s polling. Use await_completion=false or delegate_job(action="detach")
+only when the user explicitly requests non-required background work.
+Read every result page: issue next_result_call until result_delivery_complete=true.
+detail=true controls metadata, not an unbounded result dump. Do not accept a preview.
+The managed waiter returns a completion notice, not the report, and never collects it.
+Long reviews can use result_view="file" (or full_result_call) instead of paging text
+through the main context. Inspect the complete Markdown artifact/evidence before
+acceptance. verify returns a compact acknowledgement. Repeated auto result calls
+return receipts, not a second copy of the report; use result_view="page" to reread.
 
 ## Accounting boundaries
 
@@ -176,7 +243,16 @@ and fully metered. Report processed-token and uncached-proxy differences togethe
 or fewer total tokens with a different cache mix, is not proof of lower bills/subscription consumption.
 Do not fabricate baseline runs, silently exclude costs, or promise mathematically optimal quota use.
 
-Write jobs use retained clean Git worktrees. Review integration; never auto-merge or delete user changes. Local commits require explicit per-attempt authorization.
+operation is exactly read (review/analyze) or write (edit); it is not a free-text task label.
+Write jobs use retained isolated Git worktrees. For a dirty source, explicitly select
+source_inputs=["README.md","doc/PLAN.md"] with exact repository-root-relative files.
+Only selected current contents/deletions are captured at worker launch; no recursive,
+ignored or credential-file copying. Limits: 64 files, 1 MiB each, 8 MiB total. Other
+source edits stay absent; read-only reviewers already see current source files.
+Resume retains its snapshot; use a fresh task for new inputs. Source HEAD/index/files
+are untouched. Review worker changes against the input snapshot as well as HEAD.
+Review integration; never auto-merge or delete user changes. Local commits require
+explicit per-attempt authorization and may include inherited inputs only within approved paths.
 Codex and Claude/DeepSeek worker conversations archive automatically; pending cleanup is not success. Explicit resume restores the
 same thread and completion rearchives it. Job results remain available. A background completion hook can wake an idle interactive Claude session. The Stop hook also reminds Claude to collect required results. A closed session or terminated `claude -p` cannot be woken; results remain available on resume.
 

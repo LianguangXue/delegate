@@ -1,6 +1,35 @@
 # Supported surfaces and acceptance boundaries
 
-Delegate implementation: 0.17.1; optional am integration: 0.4.0+. Linux, Python 3.12+.
+Delegate implementation: 0.23.0; optional am integration: 0.4.0+. Linux, Python 3.12+.
+
+0.23 adds a discoverable CLI, complete Markdown artifacts, compact verification and
+duplicate-result receipts. Current CLI paths preserve session ownership while bypassing
+an old connected MCP schema. See the [CLI guide](CLI.zh-CN.md).
+
+0.22 adds explicit persistent controllers: parent-reviewed steps or bounded automatic
+loops, event/manifest gates and same-conversation recovery. Worker costs have a separate
+ledger; parent coordination is not declared free. No automatic goal acceptance, role
+expansion or source commits. See [persistent work](PERSISTENT.zh-CN.md).
+
+0.21 checks minimum input/output path contracts before inference, including file-tool
+cwd restrictions and same-policy Codex file readability. Output confinement/type is
+checked without claiming a successful write. Job and serving versions are separate.
+See [input contracts](INPUTS.zh-CN.md).
+
+0.20 uses the parent's per-item structured assessment to derive a difficulty floor,
+tool eligibility and model-family preference without another model call. Explicit
+models/efforts and all account/permission limits remain authoritative. See
+[routing](ROUTING.zh-CN.md).
+
+0.19 adds fingerprinted result pages and leased completion waiters. Notification can
+pause a turn in a recognized persistent host while retaining required collection;
+one-shot/unknown hosts keep the Stop guard. The CLI waiter returns a notice rather
+than collecting unseen output. See [results and waiting](RESULTS.md).
+
+0.18 supports model/effort auto within a concrete role, globally discoverable roles,
+explicit read/write operations and bounded selected draft snapshots for builders.
+See [dispatch and draft inputs](DRAFTS.md); source changes are never implicitly copied
+back, and snapshots do not change commit/provider authorization.
 
 | Capability | Claude Code parent | Codex parent | DSH parent |
 | --- | --- | --- | --- |

@@ -57,7 +57,7 @@ def save(task: dict[str, Any]) -> None:
 
 def begin(session_id: str, label: str = "Current user task", category: str = "general",
           complexity: str = "standard", case_key: str = "", arm: str = "optimized",
-          token_budget: int = 0, max_attempts: int = 3) -> dict[str, Any]:
+          token_budget: int = 0, max_attempts: int = 3, activate: bool = True) -> dict[str, Any]:
   """Start a root task; explicit baseline measurement does not enable delegation."""
   if complexity not in {"trivial", "simple", "standard", "complex"} or arm not in {"baseline", "optimized"}:
     raise ValueError("Invalid task complexity or comparison arm")
@@ -67,7 +67,7 @@ def begin(session_id: str, label: str = "Current user task", category: str = "ge
     raise ValueError("Use compact task labels and case keys")
   with st.locked():
     state = st.session(session_id)
-    if state.get("active_task"):
+    if activate and state.get("active_task"):
       return load(state["active_task"])
     context = st.read("meter-" + st.key(session_id) + ".json", {})
     task = {"id": "t" + uuid.uuid4().hex[:16], "session_id": session_id, "label": label,
@@ -75,13 +75,17 @@ def begin(session_id: str, label: str = "Current user task", category: str = "ge
             "created_at": time.time(), "status": "open", "verdict": "unrated", "evidence": "",
             "token_budget": token_budget, "max_attempts": max_attempts, "jobs": [], "requests": {},
             "native": {}, "issues": [], "transcript_path": context.get("path"),
-            "offset": context.get("turn_start", context.get("offset", 0)), "parent_observed": False}
+            "offset": context.get("turn_start", context.get("offset", 0)), "parent_observed": False,
+            "detached_controller": not activate}
+    if not activate:
+      task.update(transcript_path=None, offset=0)
     task.update(parent_complete=False, unmetered_messages={}, source_identity={})
     if not task["transcript_path"]:
       task["issues"].append("parent transcript unavailable")
     save(task)
-    state["active_task"] = task["id"]
-    st.save_session(session_id, state)
+    if activate:
+      state["active_task"] = task["id"]
+      st.save_session(session_id, state)
     index = st.read("task-index.json", [])
     st.write("task-index.json", (index + [task["id"]])[-1000:])
     return task
@@ -210,8 +214,8 @@ def hook(payload: dict[str, Any]) -> None:
     if event == "StopFailure":
       task["issues"].append("parent API failure; unreported partial usage may be missing")
     if event in {"Stop", "StopFailure"}:
-      live = (any(st.job(j)["status"] in ACTIVE and st.job(j).get("await_completion", True)
-                  and not (st.job(j)["status"] == "orphaned" and st.job(j).get("collected_at"))
+      live = (any(st.job(j).get("await_completion", True)
+                  and (not st.job(j).get("collected_at") or st.job(j)["status"] in ACTIVE - {"orphaned"})
                   for j in task["jobs"])
               or any(not child.get("complete") for child in task["native"].values()))
       if not live:
@@ -272,16 +276,21 @@ def report(task: dict[str, Any]) -> dict[str, Any]:
     issues.append("native subagent usage not observed")
   if any(child["status"] in ACTIVE for child in children):
     issues.append("jobs still active")
+  if task.get("persistent_task_ids"):
+    issues.append("persistent worker tasks are separately reported; this is not complete whole-goal accounting")
   by_model = {name: totals(rows) for name, rows in groups.items()}
   parent = totals([r["usage"] for r in task["requests"].values() if r["source"] == "parent"])
-  native_parent = st.session(task["session_id"]).get("host_kind") in {"codex", "dsh"}
+  native_parent = st.session(task["session_id"]).get("host_kind") in {"codex", "dsh"} or task.get("detached_controller")
   if native_parent:
     parent = None
   return {k: task[k] for k in ("id", "session_id", "label", "category", "complexity", "case_key", "arm",
                                "status", "verdict", "evidence", "token_budget", "max_attempts")} | {
     "parent": parent, "parent_metering": "unavailable" if native_parent else "transcript",
-    "total_scope": "observed worker usage; native parent excluded" if native_parent else "observed parent and worker usage",
+    "total_scope": "persistent worker usage; parent coordination separately reported" if task.get("detached_controller") else
+      "observed parent/direct-worker usage; persistent_task_ids separately reported" if task.get("persistent_task_ids") else
+      "observed worker usage; native parent excluded" if native_parent else "observed parent and worker usage",
     "by_provider_model": by_model,
+    "persistent_task_ids": task.get("persistent_task_ids", []),
     "total": totals([r for rows in groups.values() for r in rows]), "jobs": children,
     "elapsed_seconds": round(task.get("finished_at", time.time()) - task["created_at"], 3),
     "measurement_complete": not issues and task["status"] == "closed", "issues": sorted(set(issues)),

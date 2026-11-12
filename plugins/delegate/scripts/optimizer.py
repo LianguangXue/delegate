@@ -9,14 +9,81 @@ import accounting as ac
 import budget
 import attempts as at
 import capabilities
+import routing_policy as policy
+import input_contract
+import persistent_tasks
+from pathlib import Path
 from lifecycle import ACTIVE
 
 EFFORTS = ["low", "medium", "high", "xhigh", "max", "ultra"]
 
 
+def normalize_operation(operation: str) -> str:
+  """Keep permission choices explicit, with compatibility for common read-only labels."""
+  aliases = {"read-only": "read", "read-only review": "read", "review": "read"}
+  if isinstance(operation, str):
+    operation = aliases.get(operation, operation)
+  if operation not in ("read", "write"):
+    raise ValueError("operation must be 'read' (review/analyze without edits) or 'write' (edit in an isolated worktree)")
+  return operation
+
+
+def role_pair(role: dict[str, Any], provider: dict[str, Any], catalog: dict[str, Any],
+              model: str, effort: str, complexity: str, provider_name: str,
+              previous: dict[str, Any] | None = None) -> tuple[str, str]:
+  """Resolve auto within one explicitly selected role, never switch providers or grant permissions."""
+  import service
+  desired = {"trivial": (0, "low"), "simple": (0, "low"),
+             "standard": (1, "medium"), "complex": (2, "high")}[complexity]
+  if previous:
+    prior_tier = tier(previous["model"])
+    prior_effort = EFFORTS.index(previous["effort"]) if previous["effort"] in EFFORTS else 0
+    desired = (max(desired[0], min(2, prior_tier + (previous.get("review") == "needs-work"))),
+               EFFORTS[min(max(EFFORTS.index(desired[1]), prior_effort + (previous.get("review") == "needs-work")),
+                           len(EFFORTS) - 1)])
+  rows = catalog["models"] if provider["kind"] == "codex" else [
+    next((r for r in catalog.get("model_details", []) if r["id"] == m), {"model": m})
+    for m in catalog["models"]]
+  options = []
+  for row in rows:
+    name = row.get("model", row.get("id"))
+    if model == "auto" and row.get("hidden"):
+      continue
+    if model != "auto" and model != name:
+      continue
+    if role.get("models") is not None and name not in role["models"]:
+      continue
+    if service.model_cooldown(provider_name, name):
+      continue
+    level = tier(name, row.get("description", ""))
+    if model == "auto" and level < desired[0]:
+      continue
+    levels = ([r["reasoningEffort"] for r in row.get("supportedReasoningEfforts", [])]
+      if provider["kind"] == "codex" else row.get("effort", {}).get("supported_levels", catalog["efforts"]))
+    for candidate in levels:
+      if candidate not in EFFORTS or (role.get("efforts") is not None and candidate not in role["efforts"]):
+        continue
+      if effort != "auto" and candidate != effort:
+        continue
+      if effort == "auto" and EFFORTS.index(candidate) > EFFORTS.index(policy.MAX_AUTO_EFFORT):
+        continue
+      if effort == "auto" and complexity == "complex" and EFFORTS.index(candidate) < EFFORTS.index("high"):
+        continue
+      if previous and effort == "auto" and level <= prior_tier and EFFORTS.index(candidate) < prior_effort:
+        continue
+      options.append((abs(level - desired[0]), policy.preference(name, complexity) if model == "auto" else 0,
+                      abs(EFFORTS.index(candidate) - EFFORTS.index(desired[1])), EFFORTS.index(candidate), name, candidate))
+  if not options:
+    raise ValueError("No allowed model/effort pair satisfies this role and complexity; inspect delegate_catalog(agent_name=...) or revise explicitly")
+  chosen = min(options, key=lambda option: option[:4])
+  return chosen[4], chosen[5]
+
+
 def tier(model: str, description: str = "") -> int:
   """Classify known model families for bootstrap selection, not as measured quality ratings."""
   name = (model + " " + description).lower()
+  if policy.family(model) == "terra":
+    return 0  # Fast workflow lane; not a benchmark of intrinsic model quality.
   if "fable" in model.lower():
     return 2
   if any(word in name for word in ("luna", "haiku", "flash", "mini", "fast and affordable")):
@@ -95,25 +162,43 @@ def work_state(task: dict[str, Any], work_item: str) -> dict[str, Any] | None:
 def plan(session_id: str, work_item: str = "main", operation: str = "read",
          estimated_main_tokens: int = 0, context_chars: int = 0, refresh: bool = False,
          complexity: str = "", category: str = "", requirements: dict[str, Any] | None = None,
-         execution_profile: str = "auto") -> dict[str, Any]:
+         execution_profile: str = "auto", task_profile: dict[str, Any] | None = None,
+         cwd: str = "", required_files: list[str] | None = None, output_files: list[str] | None = None) -> dict[str, Any]:
   """Recommend main or a concrete role/model/effort; no inference or dispatch occurs here."""
   import service  # Delayed to keep service's execution gates independent.
   needed = capabilities.normalize(requirements)
   capabilities.validate_profile(execution_profile)
+  task_profile = policy.normalize(task_profile)
+  if complexity == "auto":
+    complexity = ""
+  shell = policy.assess(task_profile, complexity)["requires_shell"]
   needs_environment = any(needed[k] for k in ("gpu", "ssh", "network")) or execution_profile not in {"auto", "sandboxed"}
-  if operation not in {"read", "write"} or type(estimated_main_tokens) is not int or estimated_main_tokens < 0:
-    raise ValueError("Invalid operation or token estimate")
+  needs_environment = needs_environment or shell
+  operation = normalize_operation(operation)
+  required_files = input_contract.normalize(required_files, "required_files")
+  output_files = input_contract.normalize(output_files, "output_files")
+  needs_environment = needs_environment or bool(required_files or output_files)
+  if (required_files or output_files) and not cwd:
+    raise ValueError("cwd is required for file-access preflight")
+  if output_files and operation != "write":
+    return {"action": "replan", "reason": "output_files cannot be written by read-only reviewers; choose write with source_inputs or return the report as text"}
+  cwd = str(Path(cwd).resolve(strict=True)) if cwd else ""
+  if type(estimated_main_tokens) is not int or estimated_main_tokens < 0:
+    raise ValueError("estimated_main_tokens must be a non-negative integer")
   if type(context_chars) is not int or not 0 <= context_chars <= 100000:
     raise ValueError("context_chars must be 0..100000")
   if complexity and complexity not in {"trivial", "simple", "standard", "complex"}:
     raise ValueError("Invalid subtask complexity")
   st.key(work_item)
   state = st.session(session_id)
+  launch = persistent_tasks.context(session_id)
+  if launch:
+    state = {**state, "agents": [n for n in launch["authorized_agents"] if state["agents"] is None or n in state["agents"]]}
   if state["mode"] != "auto":
     if needs_environment:
       return {"action":"replan","reason":"Delegation is off/manual and main environment capabilities are unverified; use explicit one-shot selection or authorized non-model preflight"}
     return {"action": "main", "reason": "Automatic delegation is off/manual; explicit one-shot selection remains available"}
-  task = ac.load(state["active_task"]) if state.get("active_task") else ac.begin(session_id)
+  task = persistent_tasks.task_for(session_id) or (ac.load(state["active_task"]) if state.get("active_task") else ac.begin(session_id))
   if task["arm"] == "baseline":
     if needs_environment:
       return {"action":"replan","reason":"Baseline excludes delegation and does not verify main execution capabilities"}
@@ -126,11 +211,22 @@ def plan(session_id: str, work_item: str = "main", operation: str = "read",
     measurement = ac.report(task)
     work_jobs = [st.job(j) for j in task["jobs"] if st.job(j).get("work_item", "main") == work_item]
     previous_jobs = [j for j in work_jobs if at.model_attempted(j)]
+  prior = work_jobs[-1] if work_jobs else {}
+  if task_profile is None:
+    task_profile = policy.normalize(prior.get("task_profile"))
+  assessment = policy.assess(task_profile, complexity, prior.get("complexity") or task["complexity"])
+  shell = assessment["requires_shell"]
+  needs_environment = needs_environment or shell
   if reuse:
+    if reuse["action"] == "reuse":
+      accepted = st.job(reuse["job_id"])
+      if ((task_profile is not None and task_profile != accepted.get("task_profile"))
+          or (complexity and complexity != accepted.get("complexity"))):
+        return {"action": "replan", "job_id": accepted["id"],
+                "reason": "Task assessment changed; revalidate the accepted artifact against the new task before reuse"}
     return reuse
   # Classification belongs to this work item; do not relabel its parent ledger.
-  prior = work_jobs[-1] if work_jobs else {}
-  task = {**task, "complexity": complexity or prior.get("complexity") or task["complexity"],
+  task = {**task, "complexity": assessment["complexity"],
           "category": (category or prior.get("category") or task["category"])[:80]}
   if task["token_budget"] and measurement["total"]["processed_tokens"] >= task["token_budget"]:
     return {"action": "replan", "reason": "Observed task dispatch budget exhausted; no new work authorized by this plan"}
@@ -148,6 +244,7 @@ def plan(session_id: str, work_item: str = "main", operation: str = "read",
     if needs_environment:
       return {"action":"replan","reason":"This small task needs an execution-environment check; use authorized non-model preflight rather than assuming main capabilities or spending a worker model call"}
     return {"action": "main", "reason": "Avoid worker startup and handoff overhead for trivial work",
+            "assessment": assessment,
             "estimate_source": "bootstrap heuristic, not a measured saving"}
   cfg = st.config()
   execution_specs, capability_errors = {}, {}
@@ -159,12 +256,18 @@ def plan(session_id: str, work_item: str = "main", operation: str = "read",
       continue
     if (operation == "write") != (role["workspace"] == "worktree"):
       continue
+    if shell and provider["kind"] != "codex":
+      capability_errors["agent:" + name] = "Task validation requires shell tools; this provider is file-tools-only"
+      continue
     try:
+      if required_files or output_files:
+        input_contract.check(provider, role["workspace"], cwd, required_files, output_files)
       execution_specs[name] = capabilities.select(role, provider, requirements, execution_profile)
     except ValueError as exc:
       capability_errors["agent:" + name] = str(exc)
   if needs_environment and not execution_specs:
-    return {"action":"replan","reason":"No permitted role satisfies the execution requirements; main capabilities are unverified", "errors":capability_errors}
+    return {"action":"replan","reason":"No permitted role satisfies the execution requirements; main capabilities are unverified",
+            "assessment": assessment, "errors":capability_errors}
   if refresh and state.get("host_kind", "claude") == "claude":
     service.quota("claude", refresh=True, session_id=session_id)
   host = state.get("host_kind", "claude")
@@ -190,7 +293,9 @@ def plan(session_id: str, work_item: str = "main", operation: str = "read",
     prior_tier = tier(prior["model"])
     desired_tier = max(desired_tier, min(2, prior_tier + (prior.get("review") == "needs-work")))
     level = EFFORTS.index(prior["effort"]) if prior["effort"] in EFFORTS else 2
-    desired_effort = EFFORTS[min(level + 1, max(level, 4))]
+    desired_effort = EFFORTS[min(max(EFFORTS.index(desired_effort), level + (prior.get("review") == "needs-work")),
+                                len(EFFORTS) - 1)]
+  lane = "complex" if desired_tier == 2 else task["complexity"]
   for name, role in cfg["agents"].items():
     provider_name = role["provider"]
     provider = cfg["providers"][provider_name]
@@ -224,6 +329,8 @@ def plan(session_id: str, work_item: str = "main", operation: str = "read",
       options = []
       for row in rows:
         model = row.get("model", row.get("id"))
+        if row.get("hidden"):
+          continue
         if role.get("models") is not None and model not in role["models"]:
           continue
         if service.model_cooldown(provider_name, model):
@@ -231,14 +338,15 @@ def plan(session_id: str, work_item: str = "main", operation: str = "read",
         if quota.get("status") == "limited" and quota.get("model") == model:
           continue
         levels = [r["reasoningEffort"] for r in row.get("supportedReasoningEfforts", [])] if provider["kind"] == "codex" else row.get("effort", {}).get("supported_levels", catalog["efforts"])
-        levels = [e for e in levels if e in EFFORTS and (role.get("efforts") is None or e in role["efforts"])]
+        levels = [e for e in levels if e in EFFORTS and EFFORTS.index(e) <= EFFORTS.index(policy.MAX_AUTO_EFFORT)
+                  and (role.get("efforts") is None or e in role["efforts"])]
         model_tier = tier(model, row.get("description", ""))
         if model_tier < desired_tier:
           continue
         if desired_tier == 2:
           levels = [e for e in levels if EFFORTS.index(e) >= EFFORTS.index("high")]
         if previous_jobs and tier(model) <= tier(previous_jobs[-1]["model"]):
-          previous_level = EFFORTS.index(previous_jobs[-1]["effort"])
+          previous_level = EFFORTS.index(previous_jobs[-1]["effort"]) if previous_jobs[-1]["effort"] in EFFORTS else 0
           levels = [e for e in levels if EFFORTS.index(e) >= previous_level]
         if not levels:
           continue
@@ -247,7 +355,8 @@ def plan(session_id: str, work_item: str = "main", operation: str = "read",
       if not options:
         continue
       best_distance = min(o[0] for o in options)
-      for _, model, effort, model_tier in [o for o in options if o[0] == best_distance][:4]:
+      shortlist = sorted([o for o in options if o[0] == best_distance], key=lambda option: policy.preference(option[1], lane))
+      for _, model, effort, model_tier in shortlist[:4]:
         observed = observations(task, name, model, effort, history)
         source = "empirical" if (task["category"] != "general" and observed["attempts"] >= 3 and observed["cost_samples"] == observed["attempts"]
                                   and not observed["unreviewed"]) else "bootstrap"
@@ -257,6 +366,8 @@ def plan(session_id: str, work_item: str = "main", operation: str = "read",
                     if source == "empirical" else startup + handoff + main_tokens)
         quota_pressure = pressures[provider_name]
         candidates.append({"action": "delegate", "agent": name, "provider": provider_name, "model": model,
+          "model_family": policy.family(model), "preference_rank": policy.preference(model, lane),
+          "routing_lane": lane, "minimum_capability_tier": desired_tier,
           "execution_profile": execution["profile"],
           "effort": effort, "capability_tier": model_tier, "expected_processed_tokens": round(expected), "estimate_source": source,
           "observations": observed, "quota": quota_pressure,
@@ -278,7 +389,8 @@ def plan(session_id: str, work_item: str = "main", operation: str = "read",
                            or parent_tier is None and desired_tier < 2):
     candidates.append(main)
   if not candidates:
-    return {"action": "replan", "reason": "No eligible backend with capacity; do not expand account permissions", "errors": errors}
+    return {"action": "replan", "reason": "No eligible backend with capacity; do not expand account permissions",
+            "assessment": assessment, "errors": errors}
   # Small bounded lookups still avoid a worker. Substantial simple work prefers
   # fast models; standard/complex work requires the matching capability floor.
   if task["complexity"] == "simple" and main_tokens <= 3000 and main in candidates and not previous_jobs:
@@ -288,11 +400,17 @@ def plan(session_id: str, work_item: str = "main", operation: str = "read",
                    for c in candidates)
     candidates = [c for c in candidates if abs(
       (c["capability_tier"] if c["capability_tier"] is not None else desired_tier) - desired_tier) == distance]
+  delegates = [c for c in candidates if c["action"] == "delegate"]
+  if delegates:
+    preferred = min(c["preference_rank"] for c in delegates)
+    candidates = [c for c in candidates if c["action"] != "delegate" or c["preference_rank"] == preferred]
   best_cost = min(c["expected_processed_tokens"] for c in candidates)
   # Bounded tradeoff: surplus can win only among candidates within 15% of best token estimate.
   close = [c for c in candidates if c["expected_processed_tokens"] <= best_cost * 1.15]
   selected = min(close, key=lambda c: (-c["quota"]["surplus_priority"], c["expected_processed_tokens"]))
   result = {**selected, "id": "p" + uuid.uuid4().hex[:16], "session_id": session_id, "task_id": task["id"],
+            "cwd": cwd, "required_files": required_files, "output_files": output_files,
+            "assessment": assessment,
             "requirements": capabilities.normalize(requirements),
             "work_item": work_item, "complexity": task["complexity"], "category": task["category"],
             "created_at": time.time(), "operation": operation,
@@ -326,6 +444,12 @@ def validate_locked(task: dict[str, Any], job: dict[str, Any], plan_id: str = ""
     classification_matches = all(job.get(k) == plan[k] for k in ("complexity", "category") if k in plan)
     if plan["action"] != "delegate" or actual != expected or not classification_matches:
       raise ValueError("Dispatch does not match this session/task/model/effort plan")
+    if "assessment" in plan and job.get("task_assessment") != plan["assessment"]:
+      raise ValueError("Dispatch task assessment differs from its plan; obtain a fresh plan")
+    if "assessment" not in plan and job.get("task_profile") is not None:
+      raise ValueError("This plan predates structured task assessment; obtain a fresh plan")
+    if "required_files" in plan and any(job.get(k) != plan[k] for k in ("required_files", "output_files")):
+      raise ValueError("Dispatch file-access contract differs from its plan; obtain a fresh plan")
     execution = job.get("execution_environment") or {}
     if "requirements" in plan:
       if plan["requirements"] != execution.get("requirements") or plan.get("execution_profile") != execution.get("profile"):

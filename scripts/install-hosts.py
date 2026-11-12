@@ -89,7 +89,7 @@ def main():
   image=runtime_image.freeze(repo/'plugins/delegate/scripts')
   entry=Path(image['path'])/'delegate.py'
   binary.parent.mkdir(parents=True,exist_ok=True)
-  text='#!/bin/sh\n# managed by delegate host installer\nexec '+shlex.quote(sys.executable)+' '+shlex.quote(str(entry))+' "$@"\n'
+  text='#!/bin/sh\n# managed by delegate host installer\nexec '+shlex.quote(sys.executable)+' '+shlex.quote(str(entry))+' cli "$@"\n'
   if binary.exists() and binary.read_text()!=text:
     if '# managed by delegate host installer' not in binary.read_text():raise ValueError('Launcher already exists')
     backup(binary)

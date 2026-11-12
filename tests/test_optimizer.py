@@ -168,7 +168,7 @@ class MeterTests(unittest.TestCase):
     self.append(message("main", 10)); self.collect()
     job = {"id": "failure", "agent": "a", "provider_name": "codex", "provider": {"kind": "codex"},
            "model": "m", "effort": "low", "review": "pending", "status": "failed",
-           "usage_delta": {"inputTokens": 20, "outputTokens": 2}}
+           "usage_delta": {"inputTokens": 20, "outputTokens": 2}, "collected_at": time.time()}
     st.write("job-failure.json", job)
     task = ac.load(task["id"]); task["jobs"] = ["failure"]; ac.save(task)
     self.collect("Stop")

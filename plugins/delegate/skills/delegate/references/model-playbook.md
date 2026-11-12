@@ -1,7 +1,13 @@
 # Claude Code + delegate：按任务选模型的使用手册
 
-核查日期：2026-11-10。以下流程是本插件的操作建议，模型可用性以账号、
+核查日期：2026-11-11。以下流程是本插件的操作建议，模型可用性以账号、
 网关、CLI 和目录实测为准。API 标价不能用来计算订阅剩余额度。
+
+0.20：调用前在当前轮分析每个子任务，传 task_profile(kind/scope/uncertainty/risk/validation)，
+省略 complexity 或用 auto；不新增分类 agent。清晰的低风险执行用 Terra／low，文件处理
+可用 DeepSeek Flash／low，日常 Sol／medium，高风险或复杂 Astra／high。不要按整个项目
+一概分配强模型，也不要以“快”替代能力／验收。tests／replay 需要 shell 角色，file-only
+DeepSeek 不承担命令执行。自动 effort 不选 max／ultra；显式选择仍保留。
 
 ## 阅读背景
 

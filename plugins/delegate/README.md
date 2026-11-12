@@ -1,5 +1,34 @@
 # Delegate
 
+Version 0.23 adds CLI help/input examples and complete report-file export, compact
+verification and duplicate-result receipts. The CLI guide is shipped at
+[references/cli.md](skills/delegate/references/cli.md); start with delegate-agent --help.
+
+Version 0.22 adds explicit delegate_loop for persistent supervised steps and bounded
+automatic loops. State, conversations and worktrees survive controller reconnects;
+monitoring waits in code, costs stay visible and acceptance remains with the parent.
+See the repository's docs/PERSISTENT.zh-CN.md for limits and recovery semantics.
+
+Version 0.21 adds pre-inference file contracts (required_files/output_files), explicit
+job/serving version provenance and current-CLI migration hints. Read-only reviewers
+return report text; file-only builders use relative selected snapshot inputs. No
+automatic source commits, stash, permission expansion or paid retries.
+
+Version 0.20 lets the parent assess each subtask once with task_profile, then selects
+fast Terra/DeepSeek Flash, everyday Sol or demanding Astra within supported quotas,
+roles and tools. No classifier model call; explicit model/effort choices stay intact.
+See docs/ROUTING.zh-CN.md in the repository.
+
+Version 0.19 adds required-task completion notifications (notify=true / action=watch)
+and exact result pagination. Follow next_result_call until result_delivery_complete;
+the managed waiter reports completion but never collects or accepts unseen output.
+See the repository's docs/RESULTS.md for host/lifecycle limits.
+
+Version 0.18 adds fixed-role model/effort auto, catalog agent_name lookup and explicit
+read/write operations. source_inputs can carry selected uncommitted draft files into
+a builder's isolated worktree without changing the source files or index. See the
+repository's docs/DRAFTS.md for examples, limits and resume/commit boundaries.
+
 Version 0.17.1 separates confirmed runtime helpers from task/unknown processes in
 shutdown reports and rechecks recorded identities after cleanup. Raw child counts
 alone do not mean unfinished computation. Fresh and resumed workers must report
@@ -18,7 +47,8 @@ uses quota for coordination. DeepSeek and other Anthropic-compatible backends mu
 be configured and enabled explicitly. New provider configuration does not switch on
 delegation. Keys are provided through environment-variable references.
 
-Codex write tasks use clean detached Git worktrees, retained for inspection. Claude
+Write tasks use detached Git worktrees, retained for inspection. Explicit source_inputs
+may overlay selected drafts; otherwise a clean source is required. Claude
 and Anthropic-compatible CLI workers use restricted file tools and have no shell.
 Jobs remain pending verification until the parent validates their result. An async completion hook can wake an open idle Claude session; a Stop hook reminds
 Claude to collect required results. Closed sessions and exited `claude -p` processes

@@ -3,6 +3,89 @@
 This publication bundles the changes since the earlier 0.12.0 snapshot. Version
 numbers below describe implementation milestones, not separately published Git tags.
 
+## delegate 0.23.0
+- User CLI help/version/doctor/schema, stdin/file envelopes and direct result/verify
+  commands; empty/invalid input reports a concise error instead of JSON tracebacks.
+- Verify/archive acknowledgements and repeated auto result requests omit report text,
+  with explicit page/summary/file views and continuation/reread/full-artifact handles.
+- Full report export is exact UTF-8, atomic/no-clobber and acknowledged after publication;
+  failed/empty-path exports do not collect. Existing matching files can be reused.
+- A supported PostToolUse hook can compact legacy MCP echo without hiding first modern
+  pages or mislabeling the old server as the hook's version. CLI works independently.
+- Validation: 347 tests and independent review; installed CLI help/schema/error handling,
+  simulated dirty-source builder with unchanged files/index/HEAD, and an exact 264,146-byte
+  twelve-finding UTF-8 export. Repeated-result and verify receipts were 1,214/1,329 bytes.
+  No real provider inference or live IDE output-replacement test for this milestone.
+
+## delegate 0.22.0
+- Explicit durable parent-gated tasks and bounded loop controllers with same-conversation
+  continuation, pause/cancel, live child inspection/steering and reviewed step advance.
+- Optional file-change triggers and scoped done receipts keep waiting model-free;
+  cycle limits, soft token admission budgets and unknown-usage stops bound repetition.
+- Frozen controller/runtime, serialized control, journal repair/adoption, stable launch
+  keys and late-worker fencing prevent blind inference replay after controller crashes.
+- Separate worker ledger, original session ownership, per-cycle retry limits and explicit
+  goal evidence preserve accounting/permission/acceptance boundaries. No automatic commits.
+- Validation: 335 tests plus real-process Codex/API simulators covering controller
+  loss/recovery, exact conversation continuation, archival and reviewed advancement.
+  A bounded automatic loop skipped unchanged triggers. No real provider inference.
+
+## delegate 0.21.0
+- Required input/output file contracts reject missing/special inputs, file-tool scope
+  violations and read-only report-writing conflicts before inference. Explicit lists
+  override conservative legacy absolute-path discovery; no permission expansion.
+- Codex checks file readability with fixed same-policy command/exec before model turns;
+  file-tool builders require relative snapshot references rather than source absolutes.
+- Job/serving versions are separately visible, old new-dispatch images warn once, and
+  dirty-source failures explain source_inputs or read-only report-text recovery.
+- Validation: 312 tests, independent contract review, installed MCP rejection before
+  an API job starts, and a simulated Codex file-preflight denial with no account/thread
+  or model turn. No real provider inference or rerun of accepted analysis.
+
+## delegate 0.20.0
+- Parent-reasoned task_profile derives per-item difficulty/tool requirements; no
+  classifier inference or keyword/length-based task scoring. Mixed tasks can use
+  different lanes without relabeling their parent ledger.
+- Fast Terra/DeepSeek Flash, everyday Sol and demanding Astra preferences apply
+  before candidate truncation, respecting capabilities, roles, quotas and catalog support.
+- Tests/replay filter file-tool-only providers before discovery. Profile-bearing plans
+  bind assessments; retry inherits the item profile and changed accepted inputs replan.
+- Automatic effort is capped at xhigh, never max/ultra; failed acceptance can escalate,
+  transport/infrastructure failures alone cannot. Explicit user choices remain supported.
+- Validation: 299 tests, independent review and installed-CLI replay of local model
+  catalogs across fast execution/daily implementation/architecture/file-only cases.
+  No classifier/provider inference or live latency benchmark was run.
+
+## delegate 0.19.0
+- Complete ordinary review text instead of an 8k preview; larger results have exact
+  fingerprinted pages and ready-to-use next_result_call. UTF-8/escaping-aware strict
+  JSON budgets prevent transport slicing; collected only after all terminal text ranges.
+- notify=true / action=watch retain required collection while leased, process-verified
+  completion waiters can let recognized persistent sessions idle. Dead/stale/unknown
+  and one-shot modes retain Stop checks; terminal results still need collection.
+- Managed CLI wait has no 50-second total cap, returns a completion notice without
+  collecting unseen output, and integrates with host background-task facilities.
+- Repaired partial-result collection markers from older MCP servers; required tasks
+  remain open even if the Stop reminder reaches its loop cap before full delivery.
+- Validation: 284 tests, independent review and a 55-second model-free program wait
+  under a simulated persistent host. An 86,546-character twelve-finding report was
+  reconstructed exactly through four pages. Real IDE wake-up was not exercised.
+
+## delegate 0.18.0
+- Fixed-role model/effort auto selects within that role/provider, retaining explicit
+  choices, complexity/retry floors and catalog order without changing session mode.
+- Catalog exposes global roles and per-provider allowlists; agent_name resolves the
+  selected role's provider instead of silently showing only Codex model choices.
+- Operation schema enumerates read/write, old read-only labels normalize safely,
+  invalid values explain the allowed set before task registration.
+- Optional selected source_inputs snapshots carry staged/unstaged/untracked drafts
+  and tracked deletions into isolated builder worktrees without modifying source
+  files, HEAD or index. Bounded/no-follow file capture, hashes and scoped commits.
+- Validation: 268 tests, syntax/annotation review, installed simulated builder with
+  exact source/index preservation, and one real company DeepSeek Flash/low Read
+  review with result collection and recoverable archival. Official inference and
+  a full production review workload were not exercised for this change.
+
 ## delegate 0.17.1
 - Distinguish captured app-server/code-mode helpers from task/unknown children;
   keep raw pre-teardown counts and commands, prioritize unknown processes in summaries.

@@ -63,7 +63,7 @@ class CodexRPC:
       self.reader = threading.Thread(target=self._reader, daemon=True)
       self.reader.start()
       os.set_blocking(self.proc.stdin.fileno(), False)
-      self.call("initialize", {"clientInfo": {"name": "claude_delegate", "version": "0.17.1"},
+      self.call("initialize", {"clientInfo": {"name": "claude_delegate", "version": "0.23.0"},
                                "capabilities": {"experimentalApi": True}})
       self.send({"method": "initialized", "params": {}})
     except BaseException:

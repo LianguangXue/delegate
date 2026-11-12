@@ -7,8 +7,39 @@ import os
 import shutil
 import sys
 import tempfile
+import re
+import stat
 
 import storage as st
+
+VERSION = "0.23.0"
+_VERSIONS: dict[str, str] = {}
+
+
+def job_version(job: dict[str, Any]) -> str:
+  """Read the version of a job's immutable code image, never infer the active server from an old job."""
+  version = job.get("delegate_version")
+  if isinstance(version, str) and re.fullmatch(r"\d+\.\d+\.\d+", version):
+    return version
+  image = job.get("runtime_image") or {}
+  digest = image.get("digest", "")
+  if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+    return "unknown"
+  if digest in _VERSIONS:
+    return _VERSIONS[digest]
+  try:
+    fd = os.open(Path(image["path"]) / "delegate.py", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as stream:
+      info = os.fstat(stream.fileno())
+      if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_size > 131072:
+        return "unknown"
+      text = stream.read(131073).decode(errors="replace")
+    match = re.search(r'"serverInfo":\s*\{[^}]*"version":\s*"(\d+\.\d+\.\d+)"', text)
+    version = match[1] if match else "unknown"
+  except (OSError, ValueError, KeyError, TypeError):
+    version = "unknown"
+  _VERSIONS[digest] = version
+  return version
 
 
 def digest(files: dict[str, bytes]) -> str:
