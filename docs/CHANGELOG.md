@@ -3,6 +3,19 @@
 This publication bundles the changes since the earlier 0.12.0 snapshot. Version
 numbers below describe implementation milestones, not separately published Git tags.
 
+## delegate 0.23.2
+- Task update accepts inspected successful children with accepted_jobs/evidence, without
+  changing the parent's classification or closing it. The entire batch is validated
+  before reviews are written; retries preserve existing accepted evidence.
+- Legacy verify responses containing exact full terminal text or failure diagnostics
+  now record delivery. First uncollected legacy bodies remain visible; subsequent echoes
+  can be compacted. Verdict-only receipts and partial text never establish collection.
+- MCP initialization reports the canonical frozen-runtime version rather than a separate
+  hardcoded string. Installed versions still do not replace already-connected processes.
+- Validation: 361 tests, syntax checks and installed CLI/hook simulations. Batched child
+  reviews preserve task classification/state; full legacy verification is collected and
+  quiet across repeated tools, while partial reports remain guarded. No provider inference.
+
 ## delegate 0.23.0
 - User CLI help/version/doctor/schema, stdin/file envelopes and direct result/verify
   commands; empty/invalid input reports a concise error instead of JSON tracebacks.

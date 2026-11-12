@@ -55,7 +55,8 @@ DESCRIPTIONS = {
   "delegate_handoff": "Bind to an existing am task, record next step, sync or report a structured cross-agent handoff. Never claims a lease or marks am tasks done. Actions: bind/next/sync/report.",
   "delegate_task": "Begin/update/finish/report an end-to-end task or compare accepted complete cases. "
     "Task accounting includes parent, native subagents and plugin jobs; finish needs evidence. "
-    "finish can accept already-inspected completed child IDs via accepted_jobs, avoiding a separate verify call. "
+    "update can accept already-inspected completed child IDs via accepted_jobs and evidence without closing or reclassifying the task; "
+    "finish supports the same batch acceptance while finishing the task. Classification is frozen after dispatch. "
     "case_key must identify identical frozen inputs/acceptance for baseline vs optimized. "
     "token_budget stops subsequent dispatch after measured usage reaches it, not a hard in-flight token cap.",
   "delegate_plan": "First assess each SUBTASK in this turn with task_profile (kind, scope, uncertainty, risk, validation, optional requires_shell/reason). Omit complexity or use auto to derive it; a supplied complexity is a minimum. Do not copy the whole project's complexity onto every item or run another model just to classify. Fast bounded work prefers Terra/DeepSeek Flash, everyday work Sol, demanding work Astra; supported capability/effort, quotas, roles and retry floors still apply. "
@@ -166,6 +167,11 @@ def tool_list() -> list[dict[str, Any]]:
       properties["mode"] = {"type": "string", "enum": ["persistent", "loop"], "default": "persistent"}
       properties["run_spec"]["description"] = "Normal delegate_run task fields: agent/model/effort/task/acceptance/rationale/cwd, optional profile/resources/inputs. No session, resume, work_item or commit overrides. Each step is separate from goal acceptance."
       properties["token_budget"]["description"] = "Observed worker-token admission budget, not a hard in-flight or billing cap. Positive for automatic loop. Unknown usage blocks more inference."
+    if name == "delegate_task":
+      properties["action"] = {"type": "string", "enum": ["begin", "update", "finish", "report", "list", "compare"]}
+      properties["accepted_jobs"]["description"] = (
+        "update or finish only: successfully completed child IDs already inspected by the parent; evidence required. "
+        "update records child acceptance without closing/reclassifying the parent or marking unseen reports collected.")
     result.append({"name": name, "description": DESCRIPTIONS[name],
                    "inputSchema": {"type": "object", "properties": properties,
                                    "required": required, "additionalProperties": False}})
@@ -366,7 +372,7 @@ def mcp() -> None:
         raise ValueError("JSON-RPC params must be an object")
       if method == "initialize":
         result = {"protocolVersion": params.get("protocolVersion", "2024-11-05"),
-                  "capabilities": {"tools": {}}, "serverInfo": {"name": "delegate", "version": "0.23.0"}}
+                  "capabilities": {"tools": {}}, "serverInfo": {"name": "delegate", "version": runtime_image.VERSION}}
         if os.environ.get("DELEGATE_CALLER_HOST") in {"codex", "dsh"}:
           result["instructions"] = "Call delegate_host once per conversation; retain its session_id for all tools. Collect/validate every required result. Parent usage is not metered; no Claude idle hook exists here. Delegated workers cannot recursively delegate."
       elif method == "ping":

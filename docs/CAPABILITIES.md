@@ -1,6 +1,6 @@
 # Supported surfaces and acceptance boundaries
 
-Delegate implementation: 0.23.0; optional am integration: 0.4.0+. Linux, Python 3.12+.
+Delegate implementation: 0.23.2; optional am integration: 0.4.0+. Linux, Python 3.12+.
 
 0.23 adds a discoverable CLI, complete Markdown artifacts, compact verification and
 duplicate-result receipts. Current CLI paths preserve session ownership while bypassing

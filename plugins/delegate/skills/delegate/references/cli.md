@@ -89,6 +89,17 @@ delegate-agent verify JOB --session-id SID --verdict accepted --evidence "已检
 长证据可以用 --evidence-file。verify 默认只回简短确认，不再附带报告正文。
 显式需要完整 stdout 时用 result … --all；宿主显示仍可能截断，长报告优先 --output。
 
+父任务仍需继续时，可以批量记录已检查的子任务验收，不必 finish 父任务：
+
+```sh
+delegate-agent call <<'JSON'
+{"name":"delegate_task","arguments":{"session_id":"SID","action":"update","task_id":"TASK","accepted_jobs":["JOB"],"evidence":"已检查完整报告与验证证据"}}
+JSON
+```
+
+不传分类字段，它们在分发后已冻结。批量验收只接受同一 task/session 的成功终态任务；
+先导出或完整收取报告，验收本身不补记未读正文。重试保留已有的详细验收证据。
+
 ## MCP 的按需结果视图
 
 - result_view="auto"：首次返回正文页；相同文本已经返回过时只回简短 receipt，提供续取／重读入口。

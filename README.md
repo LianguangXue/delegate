@@ -2,7 +2,7 @@
 
 A shared delegation engine for Claude Code, Codex and DeepSeek Harness, with
 per-task model/effort, durable results and configured Claude/Codex/API workers.
-Version 0.23.0. Activation is configurable; new installations default off.
+Version 0.23.2. Activation is configurable; new installations default off.
 
 The CLI now has help/version/doctor/schema and direct result/verify commands. Export
 full reports with `delegate-agent result JOB --session-id SID --output REPORT.md`:

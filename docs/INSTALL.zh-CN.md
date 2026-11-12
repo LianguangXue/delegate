@@ -1,6 +1,6 @@
 # 快速安装：Claude Code、Codex、DeepSeek Harness
 
-当前实现：delegate 0.23.0；可选 am 0.4.0+。运行环境：Linux、Python 3.12+。
+当前实现：delegate 0.23.2；可选 am 0.4.0+。运行环境：Linux、Python 3.12+。
 只安装你需要的入口即可，不必装齐所有模型。Python 核心无需第三方包。
 本文不包含或要求上传任何 API Key。
 

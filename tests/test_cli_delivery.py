@@ -16,6 +16,7 @@ import rewake
 import service
 import storage as st
 import cli
+import runtime_image
 
 
 class CliDeliveryTests(DeliveryFixture):
@@ -56,6 +57,13 @@ class CliDeliveryTests(DeliveryFixture):
       proc = subprocess.run([sys.executable, str(SCRIPTS / "delegate.py"), *args], input=request,
         capture_output=True, text=True, timeout=15, check=True)
       self.assertEqual(json.loads(proc.stdout)["id"], 1)
+
+  def test_mcp_initialize_matches_the_canonical_runtime_version(self) -> None:
+    request = json.dumps({"id": 1, "method": "initialize", "params": {}}) + "\n"
+    for args in ([], ["mcp"], ["cli", "host-mcp", "codex"]):
+      proc = subprocess.run([sys.executable, str(SCRIPTS / "delegate.py"), *args], input=request,
+        capture_output=True, text=True, timeout=15, check=True)
+      self.assertEqual(json.loads(proc.stdout)["result"]["serverInfo"]["version"], runtime_image.VERSION)
 
   def test_optional_guide_lookup_handles_fifo_and_malformed_registry(self) -> None:
     home = Path(self.tmp.name) / "home"
@@ -166,6 +174,7 @@ class CliDeliveryTests(DeliveryFixture):
   def test_legacy_verify_and_repeat_can_be_compacted_without_changing_the_job(self) -> None:
     text = "evidence\n" * 5000
     st.update_job("jfixture", result=text, review="accepted", review_evidence="Checked")
+    result_delivery.acknowledge(st.job("jfixture"), result_delivery.fingerprint(text), 0, len(text), len(text))
     response = {**st.job("jfixture")}
     payload = {"session_id": "s", "hook_event_name": "PostToolUse", "tool_name": "mcp__x__delegate_job",
       "tool_input": {"session_id": "s", "action": "verify", "job_id": "jfixture", "verdict": "accepted"},

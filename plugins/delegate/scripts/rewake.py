@@ -112,7 +112,7 @@ def archive_delivered_history(job_id: str) -> None:
 
 
 def observe_collection(payload: dict[str, Any]) -> None:
-  """Acknowledge delivered results even when a pre-0.4.1 MCP server wrote no marker."""
+  """Acknowledge exact terminal text/diagnostics delivered by legacy run/result/verify calls."""
   if payload.get("agent_id") or payload.get("hook_event_name") != "PostToolUse":
     return
   name = str(payload.get("tool_name", ""))
@@ -120,8 +120,8 @@ def observe_collection(payload: dict[str, Any]) -> None:
   sid = payload.get("session_id")
   if not isinstance(args, dict) or not sid or args.get("session_id") != sid or not name.startswith("mcp__"):
     return
-  result_call = name.endswith("__delegate_job") and args.get("action") == "result"
-  if not result_call and not name.endswith("__delegate_run"):
+  job_call = name.endswith("__delegate_job") and args.get("action") in {"result", "verify"}
+  if not job_call and not name.endswith("__delegate_run"):
     return
   response = returned_job(payload.get("tool_response"))
   if not response or response["status"] in lifecycle.ACTIVE - {"orphaned"}:
@@ -134,13 +134,15 @@ def observe_collection(payload: dict[str, Any]) -> None:
   if "result" not in response and not failure and not partial:
     return
   jid = response["id"]
-  if result_call and args.get("job_id") != jid:
+  if job_call and args.get("job_id") != jid:
     return
   try:
     with st.locked():
       job = st.job(jid)
       if (job.get("session_id") != sid or response.get("session_id") != sid
           or response["status"] != job["status"]):
+        return
+      if failure and response.get("error") != job.get("error"):
         return
       text = job.get("result") or ""
       digest = result_delivery.fingerprint(text)
@@ -192,6 +194,8 @@ def compact_echo(payload: dict[str, Any]) -> Any:
     if action == "verify":
       if response.get("review") != args.get("verdict") or job.get("review") != args.get("verdict"):
         return None
+      if not result_delivery.proof(job)[2]:
+        return None  # Its first full legacy echo is still needed to establish actual delivery.
     else:
       if response.get("result_view") == "page" or "result_offset" in response or "result_sha256" in response:
         return None  # New servers already handle dedup; never hide their first prepared page.

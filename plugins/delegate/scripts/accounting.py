@@ -325,16 +325,18 @@ def calibrate_locked(task: dict[str, Any]) -> None:
   st.write("optimization-samples.json", dict(list(history.items())[-500:]))
 
 
-def task_tool(session_id: str, action: str = "report", task_id: str = "", label: str = "Current user task",
-              category: str = "general", complexity: str = "standard", case_key: str = "",
-              arm: str = "optimized", token_budget: int = 0, max_attempts: int = 3,
+def task_tool(session_id: str, action: str = "report", task_id: str = "", label: str | None = None,
+              category: str | None = None, complexity: str | None = None, case_key: str | None = None,
+              arm: str | None = None, token_budget: int = 0, max_attempts: int = 3,
               verdict: str = "", evidence: str = "", accepted_jobs: list[str] | None = None,
               reference_task_id: str = "") -> Any:
   """Begin/update/finish/report tasks, or compare accepted complete matched cases."""
   if action == "begin":
-    return report(begin(session_id, label, category, complexity, case_key, arm, token_budget, max_attempts))
+    return report(begin(session_id, label if label is not None else "Current user task",
+      category if category is not None else "general", complexity if complexity is not None else "standard",
+      case_key if case_key is not None else "", arm if arm is not None else "optimized", token_budget, max_attempts))
   if action == "compare":
-    return compare(case_key, reference_task_id)
+    return compare(case_key or "", reference_task_id)
   state = st.session(session_id)
   if action == "list":
     return [{k: load(t)[k] for k in ("id", "label", "status", "verdict")} for t in st.read("task-index.json", [])[-100:]
@@ -349,11 +351,16 @@ def task_tool(session_id: str, action: str = "report", task_id: str = "", label:
       raise ValueError("Task belongs to another session")
     collect(task)
     if action == "update":
-      if task["jobs"] or task["status"] != "open":
-        raise ValueError("Classify the task before dispatching jobs")
-      if complexity not in {"trivial", "simple", "standard", "complex"} or arm not in {"baseline", "optimized"}:
+      classification = {k: v for k, v in dict(label=label, category=category, complexity=complexity,
+        case_key=case_key, arm=arm).items() if v is not None}
+      if (task["jobs"] or task["status"] != "open") and any(task[k] != v for k, v in classification.items()):
+        raise ValueError("Task classification is frozen after dispatch; use accepted_jobs and evidence to record reviews")
+      if (complexity is not None and complexity not in {"trivial", "simple", "standard", "complex"}
+          or arm is not None and arm not in {"baseline", "optimized"}):
         raise ValueError("Invalid task classification")
-      task.update(label=label[:300], category=category[:80], complexity=complexity, case_key=case_key[:200], arm=arm)
+      for field, limit in (("label", 300), ("category", 80), ("case_key", 200)):
+        if field in classification:
+          classification[field] = classification[field][:limit]
     elif action == "finish":
       if verdict not in {"accepted", "needs-work", "blocked"} or not evidence.strip():
         raise ValueError("Finish requires a verdict and actual validation evidence")
@@ -361,17 +368,32 @@ def task_tool(session_id: str, action: str = "report", task_id: str = "", label:
         raise ValueError("Collect all task jobs before finishing")
       if any(not child.get("complete") for child in task["native"].values()):
         raise ValueError("Native subagent accounting is still pending; collect/report before finishing")
-      if accepted_jobs:
-        for job_id in accepted_jobs:
-          if job_id not in task["jobs"]:
-            raise ValueError("Accepted job is outside this task")
-          job = st.job(job_id)
-          if job["status"] != "completed" or job.get("error"):
-            raise ValueError("Only successfully completed jobs can be accepted")
-        for job_id in accepted_jobs:
-          job = st.job(job_id)
+    elif action != "report":
+      raise ValueError("Unknown task action")
+    if accepted_jobs is not None:
+      if action not in {"update", "finish"}:
+        raise ValueError("accepted_jobs is supported by update and finish")
+      if not isinstance(accepted_jobs, list) or any(not isinstance(j, str) for j in accepted_jobs):
+        raise ValueError("accepted_jobs must be a list of job IDs")
+      if accepted_jobs and not evidence.strip():
+        raise ValueError("Accepting jobs requires actual validation evidence")
+      jobs = []
+      for job_id in dict.fromkeys(accepted_jobs):
+        if job_id not in task["jobs"]:
+          raise ValueError("Accepted job is outside this task")
+        job = st.job(job_id)
+        if job["session_id"] != session_id or job.get("task_id") != task_id:
+          raise ValueError("Accepted job belongs to another session or task")
+        if job["status"] != "completed" or job.get("error"):
+          raise ValueError("Only successfully completed jobs can be accepted")
+        jobs.append(job)
+      for job in jobs:
+        if job.get("review") != "accepted" or not job.get("review_evidence"):
           job.update(review="accepted", review_evidence=evidence[:4000])
-          st.write("job-" + job_id + ".json", job)
+          st.write("job-" + job["id"] + ".json", job)
+    if action == "update":
+      task.update(classification)
+    elif action == "finish":
       task.update(verdict=verdict, evidence=evidence[:4000])
       if task["status"] != "closed":
         if state.get("host_kind") in {"codex", "dsh"}:
@@ -382,8 +404,6 @@ def task_tool(session_id: str, action: str = "report", task_id: str = "", label:
             st.save_session(session_id, state)
         else:
           task["status"] = "closing"  # Stop hook includes the parent's final response.
-    elif action != "report":
-      raise ValueError("Unknown task action")
     save(task)
     calibrate_locked(task)
   return report(task)

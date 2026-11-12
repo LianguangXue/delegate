@@ -209,6 +209,10 @@ the revision and revalidate; do not report it as passing the original requiremen
 
 `delegate_task(action="finish", accepted_jobs=[...], verdict="accepted"|"needs-work"|"blocked", evidence=...)`
 
+If the parent task continues, use `delegate_task(action="update", task_id=..., accepted_jobs=[...], evidence=...)`
+instead. This records child acceptance without closing the parent. Omit classification fields;
+they are frozen after dispatch. Review does not collect unseen report text.
+
 Only include child IDs whose results you actually checked. Stop captures the parent's final response locally
 without another model turn. For required long results use completion notification/managed
 waiter instead of repeated 50s polling. Use await_completion=false or delegate_job(action="detach")

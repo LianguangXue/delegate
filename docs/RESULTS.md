@@ -10,6 +10,18 @@ Verify never echoes report text. Default `result_view="auto"` returns new text o
 then compact receipts with continuation and reread handles when text was already
 returned. `page` explicitly rereads; `summary` is metadata-only and does not collect.
 
+To record already-inspected successful children without closing their parent task, use
+`delegate_task(action="update", task_id=..., accepted_jobs=[...], evidence=...)`.
+Classification fields omitted from an update stay unchanged; changing classification
+after dispatch is rejected. The entire batch must belong to the same task/session and
+be successfully completed. Existing accepted evidence is preserved on retries.
+This records reviews, not delivery of unseen text. `finish` still closes the parent.
+
+The 0.23.2 collection hook also recognizes exact full legacy `verify` responses,
+including failure diagnostics. It leaves a first full legacy body visible before
+acknowledging it; an already-delivered body's later echo can be compacted. A verdict,
+metadata-only receipt or truncated preview never substitutes for the report itself.
+
 ## Read every finding without opening private job JSON
 
 `delegate_job(action="result", session_id=..., job_id=...)` no longer silently cuts
