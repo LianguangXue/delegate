@@ -14,8 +14,9 @@ import uuid
 
 import storage as st
 from codex_rpc import CodexRPC, models
-from lifecycle import ACTIVE, identity, reconcile, cancel_orphan, group_running
+from lifecycle import ACTIVE, identity, reconcile, cancel_orphan, group_running, has_active_group
 import budget
+import gc_store
 import thread_cleanup
 import credentials
 import accounting
@@ -136,8 +137,11 @@ def quota(provider_name: str = "codex", refresh: bool = False, session_id: str =
 def control(session_id: str, action: str = "status", agents: list[str] | None = None,
             strategy: str | None = None) -> dict[str, Any]:
   """Change only one session; off never cancels existing tasks."""
-  if action not in {"status", "on", "off", "manual"}:
-    raise ValueError("action must be status/on/off/manual")
+  if action not in {"status", "on", "off", "manual", "gc"}:
+    raise ValueError("action must be status/on/off/manual/gc")
+  if action == "gc":
+    st.key(session_id)
+    return gc_store.collect_garbage(apply=False)
   if strategy is not None and strategy not in {"balanced", "preserve-claude", "preserve-parent", "quality-first"}:
     raise ValueError("Unknown strategy")
   cfg = st.config()
@@ -190,12 +194,22 @@ def validate_config(cfg: dict[str, Any]) -> None:
   low, critical = routing["claude_low_remaining_percent"], routing["claude_critical_remaining_percent"]
   if not budget.valid_percent(low) or not budget.valid_percent(critical) or not critical <= low:
     raise ValueError("Invalid Claude routing thresholds")
+  model_tiers = cfg.get("model_tiers", {})
+  if (not isinstance(model_tiers, dict)
+      or any(not isinstance(k, str) or not k.strip() or type(v) is not int or v not in {0, 1, 2}
+             for k, v in model_tiers.items())):
+    raise ValueError("model_tiers must map model names to integer tiers 0..2")
+  default_providers: list[str] = []
   for name, provider in cfg["providers"].items():
     st.key(name)
     allowed = {"kind", "enabled", "command", "models", "efforts", "base_url", "api_key_env", "balance_url",
-               "models_url", "bridge_account", "bridge_state_dir"}
+               "models_url", "bridge_account", "bridge_state_dir", "is_default"}
     if set(provider) - allowed:
       raise ValueError("Unknown provider fields; secrets must use api_key_env")
+    if "is_default" in provider and type(provider["is_default"]) is not bool:
+      raise ValueError("Provider is_default must be a boolean")
+    if provider.get("enabled") and provider.get("is_default"):
+      default_providers.append(name)
     if provider.get("kind") not in {"codex", "claude", "anthropic"}:
       raise ValueError("Supported provider kinds: codex, claude, anthropic")
     if type(provider.get("enabled")) is not bool or not isinstance(provider.get("command"), str):
@@ -230,6 +244,8 @@ def validate_config(cfg: dict[str, Any]) -> None:
         raise ValueError("Enabled provider needs model and effort allowlists")
       if set(provider["efforts"]) - {"low", "medium", "high", "xhigh", "max"}:
         raise ValueError("Unsupported Claude CLI effort")
+  if len(default_providers) > 1:
+    raise ValueError("At most one enabled provider can set is_default")
   for name, agent in cfg["agents"].items():
     st.key(name)
     if set(agent) - {"provider", "enabled", "automatic", "workspace", "instructions", "models", "efforts", "execution_profiles", "gpu_devices"}:
@@ -278,8 +294,10 @@ def configure(section: str = "show", name: str = "", value: dict[str, Any] | Non
       cfg.update(value)
     elif section == "routing" and isinstance(value, dict):
       cfg["routing"] = {**cfg.get("routing", {}), **value}
+    elif section == "model_tiers" and isinstance(value, dict):
+      cfg["model_tiers"] = {**cfg.get("model_tiers", {}), **value}
     else:
-      raise ValueError("section must be show/agents/providers/limits/routing/defaults")
+      raise ValueError("section must be show/agents/providers/limits/routing/defaults/model_tiers")
     validate_config(cfg)
     st.write("config.json", cfg)
   return cfg
@@ -416,7 +434,7 @@ def _dispatch(session_id: str, agent: str, model: str, effort: str, task: str, a
   required_files = input_contract.normalize(required_files, "required_files")
   output_files = input_contract.normalize(output_files, "output_files")
   if any(not isinstance(s, str) for s in (task, context, acceptance)) or len(task) + len(context) + len(acceptance) > 100000:
-    raise ValueError("Task packet must be text up to100000 characters; pass focused context")
+    raise ValueError("Task packet must be text up to 100000 characters; pass focused context")
   if not required_declared:
     required_files = input_contract.normalize(input_contract.discover(task + "\n" + context + "\n" + acceptance), "required_files")
   workdir = Path(cwd).resolve(strict=True)
@@ -580,7 +598,7 @@ def _dispatch(session_id: str, agent: str, model: str, effort: str, task: str, a
     if previous["session_id"] != session_id or previous["agent"] != agent:
       raise ValueError("Resume must use the same session and role")
     previous = reconcile(resume_job)
-    if previous.get("backend_starting") or group_running(previous.get("backend_identity")):
+    if has_active_group(previous):
       raise ValueError("Previous backend cleanup is unconfirmed; resume is blocked")
     if previous["status"] in ACTIVE or not previous.get("finished_at") or not previous.get("thread_id"):
       raise ValueError("Resume requires a finished job with a backend session ID")
@@ -597,7 +615,7 @@ def _dispatch(session_id: str, agent: str, model: str, effort: str, task: str, a
         continue
       siblings.append(sibling)
       sibling = reconcile(sibling_id)
-      if sibling["status"] in ACTIVE or sibling.get("backend_starting") or group_running(sibling.get("backend_identity")):
+      if sibling["status"] in ACTIVE or has_active_group(sibling):
         raise ValueError("This backend thread already has an active job or unconfirmed cleanup")
     latest = siblings[-1]  # Session registration order is stable; cleanup can rewrite finished_at.
     usage_baseline = (latest.get("usage") or {}).get("total")
@@ -713,7 +731,7 @@ def jobs(session_id: str, action: str = "list", job_id: str = "", message: str =
         current["runtime_changed_at"] = time.time()
         current["runtime_change"] = {"previous_timeout_seconds": before, "timeout_seconds": timeout_seconds,
           "operation": "extend" if extend_seconds is not None else "set_total", "extend_seconds": extend_seconds}
-        st.write("job-" + job_id + ".json", current)
+        st.write("job-" + st.key(job_id) + ".json", current)
       value = current
     requested_revision = value.get("runtime_revision", 0)
     if wait_seconds and (value.get("runtime_ack_expected") or value.get("runtime_ack_version") == 1):
@@ -753,7 +771,7 @@ def jobs(session_id: str, action: str = "list", job_id: str = "", message: str =
       with st.locked():
         current = st.job(job_id)
         current["wait_count"] = current.get("wait_count", 0) + 1
-        st.write("job-" + job_id + ".json", current)
+        st.write("job-" + st.key(job_id) + ".json", current)
     if result_view == "file":
       if value["status"] in ACTIVE - {"orphaned"}:
         return result_delivery.receipt(value)
@@ -786,7 +804,7 @@ def jobs(session_id: str, action: str = "list", job_id: str = "", message: str =
       if value["status"] not in ACTIVE:
         raise ValueError("Job ended; use delegate_run with resume_job")
       value["messages"].append({"text": message, "status": "queued", "created_at": time.time()})
-      st.write("job-" + job_id + ".json", value)
+      st.write("job-" + st.key(job_id) + ".json", value)
     return summary(value)
   if action == "verify":
     if value["status"] in ACTIVE or verdict not in {"accepted", "needs-work", "blocked"} or not evidence.strip():

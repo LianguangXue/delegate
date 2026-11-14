@@ -8,6 +8,7 @@ import stat
 import sys
 
 import completion
+import gc_store
 import hosts
 import persistent_tasks
 import result_delivery
@@ -147,6 +148,9 @@ def parser() -> argparse.ArgumentParser:
   sub.add_argument("--host", choices=["claude", "codex", "dsh"])
   sub = commands.add_parser("schema", help="Show the exact current tool input schema")
   sub.add_argument("tool", nargs="?")
+  sub = commands.add_parser("gc", help="Inspect or reclaim expired state; dry-run by default")
+  sub.add_argument("--apply", action="store_true", help="Actually delete expired state, orphaned WAL files, and unused runtimes")
+  sub.add_argument("--retention-days", type=int, default=14, help="Age in days before terminal artifacts expire (default: 14)")
   return root
 
 
@@ -216,6 +220,8 @@ def main(argv: list[str], dispatch: Callable[[str, dict[str, Any]], Any],
             raise ValueError("--force requires --output")
           arguments.update(result_view=args.view, result_offset=args.offset, result_limit=args.limit, result_sha256=args.sha256)
         result = dispatch("delegate_job", arguments)
+    elif args.command == "gc":
+      result = gc_store.collect_garbage(apply=args.apply, retention_days=args.retention_days)
     else:
       root.print_help()
       return 0

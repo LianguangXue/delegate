@@ -9,13 +9,13 @@ import time
 
 import storage as st
 from codex_rpc import CodexRPC
-from lifecycle import ACTIVE, group_running, alive, identity
+from lifecycle import ACTIVE, alive, group_running, has_active_group, identity, mark_helper
 
 
 @contextmanager
 def guard(thread_id: str, wait_seconds: float = 0) -> Iterator[None]:
   """Serialize resume registration and archival without holding the global JSON lock."""
-  with (st.root() / ("thread-" + st.key(thread_id) + ".lock")).open("a") as stream:
+  with st.lock_path("thread-" + st.key(thread_id)).open("a") as stream:
     deadline = time.monotonic() + wait_seconds
     while True:
       try:
@@ -78,26 +78,26 @@ def archive(job_id: str, finishing: bool = False) -> dict[str, Any]:
     return cli_history.archive(job_id, finishing)
   with guard(thread_id):
     value = st.job(job_id)
-    if (value["status"] in ACTIVE and not finishing) or value.get("backend_starting") or group_running(value.get("backend_identity")):
+    if (value["status"] in ACTIVE and not finishing) or has_active_group(value):
       raise ValueError("Cannot archive before the owned backend has stopped")
     siblings = []
     for other_id in st.session(value["session_id"])["jobs"]:
       other = st.job(other_id)
       if other.get("thread_id") != thread_id:
         continue
-      if other_id != job_id and (other["status"] in ACTIVE or alive(other.get("worker_identity")) or group_running(other.get("backend_identity"))):
+      if other_id != job_id and (other["status"] in ACTIVE or alive(other.get("worker_identity")) or has_active_group(other)):
         raise ValueError("Another job is still using this thread")
       siblings.append(other_id)
     receipt = {"status": "archiving", "thread_id": thread_id, "started_at": time.time()}
     st.update_job(job_id, codex_session=receipt)
     try:
-      st.update_job(job_id, backend_starting=True)
+      mark_helper(job_id, True)
       def registered(pid: int) -> None:
-        st.update_job(job_id, backend_starting=False, backend_identity=identity(pid, include_zombies=True))
+        mark_helper(job_id, False, identity(pid, include_zombies=True))
       try:
         connection = CodexRPC(value["provider"]["command"], on_spawn=registered)
       except FileNotFoundError:
-        st.update_job(job_id, backend_starting=False)
+        mark_helper(job_id, False)
         raise
       with connection as rpc:
         before = rpc.call("thread/read", {"threadId": thread_id})["thread"]
@@ -117,7 +117,7 @@ def archive(job_id: str, finishing: bool = False) -> dict[str, Any]:
     except Exception as exc:
       receipt.update(status="pending", error=str(exc))
       current = st.job(job_id)
-      if current.get("backend_starting") or group_running(current.get("backend_identity")):
+      if has_active_group(current):
         st.update_job(job_id, codex_session=receipt, status="orphaned",
                       error="Archive backend cleanup unconfirmed; resume is blocked")
       else:

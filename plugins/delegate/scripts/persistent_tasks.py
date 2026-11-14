@@ -178,7 +178,7 @@ def validate_spec(session_id: str, spec: dict[str, Any], one_shot: bool, mode: s
     if not isinstance(spec.get(key), str) or not spec[key].strip():
       raise ValueError("run_spec requires nonempty " + key)
   if any(len(spec[k]) > 200 for k in ("agent", "model", "effort")):
-    raise ValueError("Persistent model/role identifiers must be at most200 characters")
+    raise ValueError("Persistent model/role identifiers must be at most 200 characters")
   if not Path(spec["cwd"]).is_dir():
     raise ValueError("run_spec cwd must exist")
   cfg, state = st.config(), st.session(session_id)
@@ -393,7 +393,7 @@ def tick(loop_id: str) -> bool:
 def run(loop_id: str) -> None:
   """Own one restartable supervisor process; no model calls while sleeping or awaiting parent review."""
   os.umask(0o077)
-  lock = st.root() / ("loop-controller-" + st.key(loop_id) + ".lock")
+  lock = st.lock_path("loop-controller-" + st.key(loop_id))
   with lock.open("a") as stream:
     try:
       fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -437,6 +437,10 @@ def wait(payload: dict[str, Any]) -> dict[str, Any]:
   after = payload.get("after", 0)
   if type(after) is not int or after < 0:
     raise ValueError("after must be a non-negative event sequence")
+  timeout_seconds = payload.get("timeout_seconds", 300)
+  if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 600:
+    raise ValueError("timeout_seconds must be 1..600")
+  deadline = time.monotonic() + timeout_seconds
   while True:
     loop = load(lid)
     if loop["session_id"] != sid:
@@ -449,7 +453,11 @@ def wait(payload: dict[str, Any]) -> dict[str, Any]:
     starting = loop.get("controller_starting") or {}
     if loop["status"] not in IDLE and not alive(controller) and not alive(starting.get("child")) and not alive(starting.get("launcher")):
       return {"id": lid, "session_id": sid, "status": "controller_lost", "next_action": "delegate_loop recover; existing child will be adopted, not replayed"}
-    time.sleep(2)
+    if time.monotonic() >= deadline:
+      return {"id": lid, "session_id": sid, "event_seq": loop.get("event_seq", 0),
+        "status": "timeout", "current_job": loop.get("current_job"),
+        "next_action": "re-arm watch or inspect delegate_loop status"}
+    time.sleep(min(2.0, max(0.05, deadline - time.monotonic())))
 
 
 def returned_loop(value: Any) -> dict[str, Any] | None:
@@ -490,7 +498,7 @@ def watch(payload: dict[str, Any]) -> bool:
   loop = load(lid)
   if loop["session_id"] != sid:
     return False
-  lock = st.root() / ("loop-rewake-" + st.key(lid) + ".lock")
+  lock = st.lock_path("loop-rewake-" + st.key(lid))
   with lock.open("a") as stream:
     try:
       fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -498,6 +506,8 @@ def watch(payload: dict[str, Any]) -> bool:
       return False
     after = (response or {}).get("notice_after", loop.get("ack_seq", 0))
     notification = wait({"session_id": sid, "loop_id": lid, "after": after})
+    if notification["status"] == "timeout":
+      return False
     if notification["status"] == "controller_lost":
       print("Persistent controller stopped; inspect/recover " + lid + ". No model was automatically replayed.", file=sys.stderr, flush=True)
       return True
@@ -581,7 +591,7 @@ def manage(session_id: str, action: str = "list", loop_id: str = "", mode: str =
     values = {}
     if max_cycles is not None:
       if type(max_cycles) is not int or not max(1, loop["completed_cycles"]) <= max_cycles <= 100:
-        raise ValueError("max_cycles must cover existing cycles and be at most100")
+        raise ValueError("max_cycles must cover existing cycles and be at most 100")
       values["max_cycles"] = max_cycles
     if token_budget is not None:
       if type(token_budget) is not int or token_budget < 0 or (loop["mode"] == "loop" and not token_budget):
@@ -589,7 +599,7 @@ def manage(session_id: str, action: str = "list", loop_id: str = "", mode: str =
       values["token_budget"] = token_budget
     if interval_seconds is not None:
       if type(interval_seconds) is not int or not 30 <= interval_seconds <= 86400:
-        raise ValueError("interval_seconds must be30..86400")
+        raise ValueError("interval_seconds must be 30..86400")
       values["interval_seconds"] = interval_seconds
     with st.locked():
       loop = load(loop_id)

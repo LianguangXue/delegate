@@ -12,7 +12,7 @@ import stat
 
 import storage as st
 
-VERSION = "0.24.0"
+VERSION = "0.25.0"
 _VERSIONS: dict[str, str] = {}
 
 
@@ -27,19 +27,28 @@ def job_version(job: dict[str, Any]) -> str:
     return "unknown"
   if digest in _VERSIONS:
     return _VERSIONS[digest]
-  try:
-    fd = os.open(Path(image["path"]) / "delegate.py", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    with os.fdopen(fd, "rb") as stream:
-      info = os.fstat(stream.fileno())
-      if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_size > 131072:
-        return "unknown"
-      text = stream.read(131073).decode(errors="replace")
-    match = re.search(r'"serverInfo":\s*\{[^}]*"version":\s*"(\d+\.\d+\.\d+)"', text)
-    version = match[1] if match else "unknown"
-  except (OSError, ValueError, KeyError, TypeError):
-    version = "unknown"
-  _VERSIONS[digest] = version
-  return version
+  found = "unknown"
+  image_dir = Path(image["path"])
+  for filename, pattern in (
+    ("runtime-image.json", r'"version"\s*:\s*"(\d+\.\d+\.\d+)"'),
+    ("runtime_image.py", r'^VERSION\s*=\s*"(\d+\.\d+\.\d+)"'),
+    ("delegate.py", r'"serverInfo":\s*\{[^}]*"version":\s*"(\d+\.\d+\.\d+)"'),
+  ):
+    try:
+      fd = os.open(image_dir / filename, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+      with os.fdopen(fd, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_size > 131072:
+          continue
+        text = stream.read(131073).decode(errors="replace")
+      match = re.search(pattern, text, re.M)
+      if match:
+        found = match[1]
+        break
+    except (OSError, ValueError, KeyError, TypeError):
+      continue
+  _VERSIONS[digest] = found
+  return found
 
 
 def digest(files: dict[str, bytes]) -> str:
@@ -81,7 +90,12 @@ def freeze(source: Path) -> dict[str, Any]:
     try:
       for name, data in files.items():
         (temp / name).write_bytes(data)
-      (temp / "runtime-image.json").write_text(json.dumps({"digest": fingerprint, "files": sorted(files)}))
+      (temp / "runtime-image.json").write_text(
+        json.dumps({"digest": fingerprint, "version": VERSION, "files": sorted(files)})
+      )
+      for path in temp.iterdir():
+        path.chmod(0o400)
+      temp.chmod(0o500)
       try:
         os.rename(temp, target)
       except OSError:
@@ -89,10 +103,13 @@ def freeze(source: Path) -> dict[str, Any]:
           raise
     finally:
       if temp.exists():
+        temp.chmod(0o700)
+        for path in temp.iterdir():
+          try:
+            path.chmod(0o600)
+          except OSError:
+            pass
         shutil.rmtree(temp)
-    for path in target.iterdir():
-      path.chmod(0o400)
-    target.chmod(0o500)
   verify(target, fingerprint)
   return {"path": str(target), "digest": fingerprint}
 
@@ -102,7 +119,7 @@ def bootstrap() -> None:
   source = Path(__file__).resolve().parent
   image = freeze(source)
   if Path(image["path"]) != source:
-    os.execv(sys.executable, [sys.executable, str(Path(image["path"]) / "delegate.py"), *sys.argv[1:]])
+    os.execv(sys.executable, [sys.executable, "-B", str(Path(image["path"]) / "delegate.py"), *sys.argv[1:]])
 
 
 def require_worker(job: dict[str, Any], directory: Path) -> None:

@@ -3,6 +3,20 @@
 This publication bundles the changes since the earlier 0.12.0 snapshot. Version
 numbers below describe implementation milestones, not separately published Git tags.
 
+## delegate 0.25.0
+- Harden runtime image publishing (`runtime-image.json` version stamp, read-only permissions
+  before atomic rename, `-B` launcher/bootstrap flags) and align `codex_rpc` `clientInfo`
+  with `runtime_image.VERSION`.
+- Eliminate WAL `dispatch-<jid>.json` growth, move per-entity lock files under `locks/`,
+  maintain `pending_jobs` on session records for bounded hook scans, and add dry-run-first
+  store garbage collection (`delegate-agent gc`, `delegate_control action="gc"`).
+- Separate `inference_identity` from git/archive `helper_identity` and let `cancel_orphan`
+  cleanly recover dead orphaned records.
+- Enforce `st.key()` across file-backed helpers, redact Claude CLI diagnostics alongside
+  Codex stderr, bound `AGENTS.md`/`CLAUDE.md` ancestor walks against symlinks, cap
+  `persistent_tasks.wait()`, fix Feb 29 quota reset parsing, and honor configured
+  `model_tiers` and `is_default` provider hints.
+
 ## delegate 0.24.0
 - Keep eligible models through expected-work estimation; family preferences no longer
   erase quota/cost alternatives or hide empirical candidates beyond the first four rows.

@@ -133,7 +133,7 @@ def observe_collection(payload: dict[str, Any]) -> None:
              or response.get("result_delivery_complete") is False)
   if "result" not in response and not failure and not partial:
     return
-  jid = response["id"]
+  jid = st.key(response["id"])
   if job_call and args.get("job_id") != jid:
     return
   try:
@@ -242,7 +242,7 @@ def watch(payload: dict[str, Any]) -> bool:
   if job.get("session_id") != sid:
     return False
   # Concurrent duplicate hooks cannot notify the same live job simultaneously.
-  lock = st.root() / ("rewake-" + st.key(jid) + ".lock")
+  lock = st.lock_path("rewake-" + st.key(jid))
   with lock.open("a") as stream:
     try:
       fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)

@@ -64,15 +64,51 @@ def stop_owned(proc: subprocess.Popen, record: dict[str, Any]) -> None:
     os.killpg(record["pid"], signal.SIGTERM)
     deadline = time.monotonic() + 5
     while group_running(record) and time.monotonic() < deadline:
-      time.sleep(0.05)
+      time.sleep(0.1)
     if group_running(record):
       os.killpg(record["pid"], signal.SIGKILL)
       deadline = time.monotonic() + 3
       while group_running(record) and time.monotonic() < deadline:
-        time.sleep(0.05)
+        time.sleep(0.1)
     if group_running(record):
       raise RuntimeError("Owned backend group is still running")
   proc.wait(timeout=3)
+
+
+def active_groups(value: dict[str, Any]) -> list[dict[str, Any]]:
+  """Return distinct process-group identity records recorded on ``value``."""
+  groups: list[dict[str, Any]] = []
+  seen: set[tuple[int, str, str]] = set()
+  for field in ("inference_identity", "backend_identity", "helper_identity"):
+    rec = value.get(field)
+    if isinstance(rec, dict) and isinstance(rec.get("pid"), int):
+      sig = (rec["pid"], str(rec.get("start", "")), str(rec.get("boot", "")))
+      if sig not in seen:
+        seen.add(sig)
+        groups.append(rec)
+  return groups
+
+
+def has_active_group(value: dict[str, Any]) -> bool:
+  """Return True if any inference or helper process group is starting or running."""
+  targets: list[dict[str, Any] | None] = list(active_groups(value)) or [None]
+  return bool(value.get("backend_starting") or value.get("helper_starting")
+              or any(group_running(record) for record in targets))
+
+
+def mark_helper(job_id: str, starting: bool, record: dict[str, Any] | None = None, **extra: Any) -> None:
+  """Record helper process state without overwriting a live inference backend identity."""
+  with st.locked():
+    value = st.job(job_id)
+    updates: dict[str, Any] = {"helper_starting": starting, **extra}
+    if record is not None:
+      updates["helper_identity"] = record
+    if not group_running(value.get("inference_identity")):
+      updates["backend_starting"] = starting
+      if record is not None:
+        updates["backend_identity"] = record
+    value.update(updates)
+    st.write("job-" + st.key(job_id) + ".json", value)
 
 
 def reconcile(job_id: str) -> dict[str, Any]:
@@ -83,7 +119,7 @@ def reconcile(job_id: str) -> dict[str, Any]:
       return value
     if alive(value.get("worker_identity")):
       return value
-    if value.get("backend_starting") or group_running(value.get("backend_identity")):
+    if has_active_group(value):
       value.update(status="orphaned", error="Worker exited but backend group remains; cancel before resuming")
     else:
       value.update(status="failed", error="Worker exited unexpectedly; backend is no longer running",
@@ -93,24 +129,30 @@ def reconcile(job_id: str) -> dict[str, Any]:
 
 
 def cancel_orphan(job_id: str) -> dict[str, Any]:
-  """Stop an orphan backend only if its recorded process identity still matches."""
+  """Stop an orphan backend cleanly, or settle dead orphaned jobs when no group remains."""
   value = st.job(job_id)
-  record = value.get("backend_identity")
-  if not alive(record):
-    raise ValueError("Backend identity cannot be verified; inspect the recorded process group before recovery")
-  os.killpg(record["pid"], signal.SIGTERM)
-  deadline = time.monotonic() + 5
-  while group_running(record) and time.monotonic() < deadline:
-    time.sleep(0.1)
-  if group_running(record):
-    # Only escalate while the original leader still has the same identity.
-    if alive(record):
-      os.killpg(record["pid"], signal.SIGKILL)
-    else:
-      raise ValueError("Backend leader exited; group still present, inspect before recovery")
-    deadline = time.monotonic() + 3
+  groups = active_groups(value)
+  live_or_running = [rec for rec in groups if alive(rec) or group_running(rec)]
+  if not live_or_running:
+    if value.get("backend_starting") or value.get("helper_starting"):
+      raise ValueError("Backend startup state is active; inspect before recovery")
+    return st.update_job(job_id, status="cancelled", finished_at=time.time(), cancel_requested=True)
+  for record in live_or_running:
+    if not alive(record):
+      raise ValueError("Backend identity cannot be verified; inspect the recorded process group before recovery")
+    os.killpg(record["pid"], signal.SIGTERM)
+    deadline = time.monotonic() + 5
     while group_running(record) and time.monotonic() < deadline:
       time.sleep(0.1)
-  if group_running(record):
-    raise ValueError("Backend group is still exiting; retry result after it stops")
+    if group_running(record):
+      # Only escalate while the original leader still has the same identity.
+      if alive(record):
+        os.killpg(record["pid"], signal.SIGKILL)
+      else:
+        raise ValueError("Backend leader exited; group still present, inspect before recovery")
+      deadline = time.monotonic() + 3
+      while group_running(record) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    if group_running(record):
+      raise ValueError("Backend group is still exiting; retry result after it stops")
   return st.update_job(job_id, status="cancelled", finished_at=time.time(), cancel_requested=True)

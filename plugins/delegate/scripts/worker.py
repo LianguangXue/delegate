@@ -5,6 +5,7 @@ import json
 import hashlib
 import os
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -13,7 +14,7 @@ import tempfile
 
 import storage as st
 from codex_rpc import CodexRPC
-from lifecycle import identity, group_running, stop_owned
+from lifecycle import identity, group_running, has_active_group, stop_owned
 import thread_cleanup
 import credentials
 import commits
@@ -75,19 +76,29 @@ def packet(value: dict[str, Any]) -> str:
   instruction_parts = []
   seen_instructions = set()
   source = Path(value["source_cwd"])
-  for directory in reversed([source, *source.parents]):
+  for directory in reversed([source, *source.parents][:16]):
     for name in ("AGENTS.md", "CLAUDE.md"):
       path = directory / name
-      if path.is_file() and path.resolve() not in seen_instructions:
-        seen_instructions.add(path.resolve())
-        with path.open() as stream:
-          text = stream.read(40001)
-        if len(text) > 40000:
-          instruction_parts.append("REQUIRED INSTRUCTION FILE: " + str(path) +
-            ". Before doing the task, read this entire file in bounded chunks with your file tools. "
-            "It is referenced instead of inlined due to size. If you cannot read it, report blocked.")
-        else:
-          instruction_parts.append(str(path) + "\n" + text)
+      if path.is_symlink() or not path.is_file():
+        continue
+      resolved = path.resolve()
+      if resolved in seen_instructions:
+        continue
+      seen_instructions.add(resolved)
+      try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+      except OSError:
+        continue
+      with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+          continue
+        text = stream.read(40001)
+      if len(text) > 40000:
+        instruction_parts.append("REQUIRED INSTRUCTION FILE: " + str(path) +
+          ". Before doing the task, read this entire file in bounded chunks with your file tools. "
+          "It is referenced instead of inlined due to size. If you cannot read it, report blocked.")
+      else:
+        instruction_parts.append(str(path) + "\n" + text)
   return "\n\n".join([
     environment_brief(value),
     ACCEPTANCE_POLICY,
@@ -146,7 +157,7 @@ def message_status(job_id: str, index: int, status: str, error: str = "") -> Non
   with st.locked():
     value = st.job(job_id)
     value["messages"][index].update(status=status, error=error)
-    st.write("job-" + job_id + ".json", value)
+    st.write("job-" + st.key(job_id) + ".json", value)
 
 
 def codex_worker(value: dict[str, Any], prompt: str) -> dict[str, Any]:
@@ -168,10 +179,11 @@ def codex_worker(value: dict[str, Any], prompt: str) -> dict[str, Any]:
       return {"status": "failed", "error": str(exc) + "; no model or resource probe was started"}
   st.update_job(job_id, backend_starting=True)
   def registered(pid: int) -> None:
-    st.update_job(job_id, backend_identity=identity(pid, include_zombies=True), backend_starting=False)
+    rec = identity(pid, include_zombies=True)
+    st.update_job(job_id, inference_identity=rec, backend_identity=rec, backend_starting=False)
   try:
     connection = CodexRPC(value["provider"]["command"], on_spawn=registered, deadline=lambda: runtime.live_deadline(job_id, started),
-                          cancelled=lambda: st.job(job_id)["cancel_requested"], stderr_path=st.root() / ("stderr-" + job_id + ".txt"),
+                          cancelled=lambda: st.job(job_id)["cancel_requested"], stderr_path=st.root() / ("stderr-" + st.key(job_id) + ".txt"),
                           env_overrides=capabilities.environment(value))
   except FileNotFoundError:
     st.update_job(job_id, backend_starting=False)
@@ -322,7 +334,7 @@ def codex_worker(value: dict[str, Any], prompt: str) -> dict[str, Any]:
           with st.locked():
             record = st.job(job_id)
             record["validation_test_paths"] = list(dict.fromkeys(record.get("validation_test_paths", []) + targets))[-64:]
-            st.write("job-" + job_id + ".json", record)
+            st.write("job-" + st.key(job_id) + ".json", record)
         commands[item["id"]] = {"id": item["id"], "command": diagnostics.redact(str(item.get("command", "")), secret_values)[:2000],
                                 "started_at": time.time()}
         st.update_job(job_id, active_commands=list(commands.values())[:256])
@@ -401,13 +413,14 @@ def claude_worker(value: dict[str, Any], prompt: str) -> dict[str, Any]:
   import cli_history
   cli_history.restore(value)
   command, env = claude_command(value)
+  secret_values = diagnostics.secrets(env)
   config_dir = env.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
   Path(config_dir).mkdir(parents=True, mode=0o700, exist_ok=True)
   st.update_job(job_id, backend_config_dir=config_dir)
   thread_id = command[-1]
   st.update_job(job_id, thread_id=thread_id)
-  output_path = st.root() / ("output-" + job_id + ".json")
-  error_path = st.root() / ("stderr-" + job_id + ".txt")
+  output_path = st.root() / ("output-" + st.key(job_id) + ".json")
+  error_path = st.root() / ("stderr-" + st.key(job_id) + ".txt")
   with tempfile.TemporaryFile(mode="w+") as output, tempfile.TemporaryFile(mode="w+") as error, tempfile.TemporaryFile(mode="w+") as input_file:
     input_file.write(prompt)
     input_file.seek(0)
@@ -421,7 +434,7 @@ def claude_worker(value: dict[str, Any], prompt: str) -> dict[str, Any]:
       raise
     process_identity = identity(proc.pid, include_zombies=True)
     try:
-      st.update_job(job_id, backend_identity=process_identity, backend_starting=False)
+      st.update_job(job_id, inference_identity=process_identity, backend_identity=process_identity, backend_starting=False)
       started = time.monotonic()
       st.update_job(job_id, execution_started_at=time.time(), progress_observable=False, phase="executing")
       runtime.settings(job_id)
@@ -437,14 +450,16 @@ def claude_worker(value: dict[str, Any], prompt: str) -> dict[str, Any]:
       st.update_job(job_id, execution_finished_at=time.time(), phase="collecting-result")
       output.flush()
       output.seek(0)
-      raw = credentials.redact(output.read(), env)
+      raw = diagnostics.redact(credentials.redact(output.read(), env), secret_values)
       try:
         result = credentials.redact_data(json.loads(raw), env)
       except ValueError:
         error.seek(0)
-        raise RuntimeError("Worker failed: " + credentials.redact(error.read() + raw, env)[-4000:])
+        raise RuntimeError("Worker failed: " + diagnostics.redact(credentials.redact(error.read() + raw, env), secret_values)[-4000:])
+      if isinstance(result.get("result"), str):
+        result["result"] = diagnostics.redact(result["result"], secret_values)
       if result.get("api_error") == "usage_limit_reached":
-        quota_name = "claude-quota.json" if value["provider"]["kind"] == "claude" else "quota-" + value["provider_name"] + ".json"
+        quota_name = "claude-quota.json" if value["provider"]["kind"] == "claude" else "quota-" + st.key(value["provider_name"]) + ".json"
         st.write(quota_name, {"status": "limited", "observed_at": time.time(), "model": value["model"],
                              "source": "provider inference response", "reason": result.get("result"),
                              "data": {"api_error": "usage_limit_reached"}})
@@ -464,7 +479,7 @@ def claude_worker(value: dict[str, Any], prompt: str) -> dict[str, Any]:
             safe = json.dumps(credentials.redact_data(json.loads(raw), env), ensure_ascii=False)
           except ValueError:
             safe = credentials.redact(raw, env)
-          path.write_text(safe)
+          path.write_text(diagnostics.redact(safe, secret_values))
 
 
 def main(job_id: str) -> None:
@@ -518,7 +533,7 @@ def main(job_id: str) -> None:
     if (runtime_verified and prepared_worktree_here and (current.get("execution_environment") or {}).get("preflight", {}).get("status") == "blocked"
         and current.get("workspace_setup", {}).get("created_by_job") and not current.get("resume_job")
         and not at.model_attempted(current)
-        and not current.get("backend_starting") and not group_running(current.get("backend_identity"))):
+        and not has_active_group(current)):
       workspaces.rollback(job_id, current["workspace_setup"]["source_root"], Path(current["worktree"]))
       st.update_job(job_id, phase="capability-preflight-blocked")
       current = st.job(job_id)
@@ -533,7 +548,7 @@ def main(job_id: str) -> None:
       if current.get("loop_id"):
         recovery.update(action="inspect_persistent_task", loop_id=current["loop_id"])
       st.update_job(job_id, **outcome, finished_at=time.time(), recovery=recovery)
-    elif current.get("backend_starting") or group_running(current.get("backend_identity")):
+    elif has_active_group(current):
       st.update_job(job_id, status="orphaned", error="Backend cleanup is unconfirmed; inspect before resuming")
     else:
       if current.get("thread_id") and (current.get("execution_environment") or {}).get("preflight", {}).get("status") != "blocked":
@@ -544,7 +559,7 @@ def main(job_id: str) -> None:
           field = "codex_session" if current["provider"]["kind"] == "codex" else "cli_session"
           st.update_job(job_id, **{field: {"status": "pending", "error": str(exc)}})
       current = st.job(job_id)
-      if current.get("backend_starting") or group_running(current.get("backend_identity")):
+      if has_active_group(current):
         st.update_job(job_id, status="orphaned", error="Cleanup backend is unconfirmed; inspect before resuming")
       else:
         if current.get("cancel_requested"):
@@ -565,7 +580,7 @@ def main(job_id: str) -> None:
           final_state = st.job(job_id)
         if final_state.get("cancel_requested"):
           outcome.update(status="cancelled")
-        if final_state.get("backend_starting") or group_running(final_state.get("backend_identity")):
+        if has_active_group(final_state):
           st.update_job(job_id, status="orphaned", error="Commit backend cleanup is unconfirmed; inspect before resuming")
         else:
           st.update_job(job_id, **outcome, finished_at=time.time())

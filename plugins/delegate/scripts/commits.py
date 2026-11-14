@@ -44,23 +44,23 @@ def validate(allowed: bool, message: str, paths: list[str] | None, workspace: st
 def git(cwd: Path, *args: str) -> str:
   """Run Git without shell expansion; preserve author identity configured by the user."""
   env = {k:v for k,v in os.environ.items() if not k.startswith("GIT_") or k.startswith(("GIT_AUTHOR_", "GIT_COMMITTER_"))}
-  from lifecycle import identity, stop_owned
+  from lifecycle import identity, mark_helper, stop_owned
   import storage as st
   job_id = _CURRENT_JOB.get()
   if job_id:
-    st.update_job(job_id, backend_starting=True)
+    mark_helper(job_id, True)
   try:
     proc = subprocess.Popen(["git", "--literal-pathspecs", "-C", str(cwd), *args],
     stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
       text=True, env=env, start_new_session=True)
   except OSError:
     if job_id:
-      st.update_job(job_id, backend_starting=False)
+      mark_helper(job_id, False)
     raise
   record = identity(proc.pid, include_zombies=True)
   try:
     if job_id:
-      st.update_job(job_id, backend_identity=record, backend_starting=False)
+      mark_helper(job_id, False, record)
     output, error = proc.communicate(timeout=30)
     if proc.returncode:
       raise ValueError("Git commit helper failed: " + error[-2000:])

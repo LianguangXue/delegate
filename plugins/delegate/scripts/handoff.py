@@ -12,8 +12,9 @@ from lifecycle import ACTIVE
 
 def _sync(session_id: str, scope: str = "") -> dict[str, Any]:
   """Persist the newest snapshot before attempting delivery; failures remain retryable."""
+  safe_sid = st.key(session_id)
   with st.locked():
-    state = st.session(session_id)
+    state = st.session(safe_sid)
     binding = state.get("am_bindings", {}).get(scope) if scope else state.get("am_binding")
     if not binding:
       return {"linked": False}
@@ -22,25 +23,26 @@ def _sync(session_id: str, scope: str = "") -> dict[str, Any]:
       st.job(jid).get("task_id") == binding["delegate_task_id"] and
       (not binding.get("work_item") or st.job(jid).get("work_item") == binding["work_item"]))]
     for jid in selected[-100:]:
-      j = st.job(jid)
+      safe_jid = st.key(jid)
+      j = st.job(safe_jid)
       jobs.append({k: j.get(k) for k in ("id", "task_id", "work_item", "status", "model", "effort",
         "review", "review_evidence", "collected_at", "source_cwd", "cwd", "base_commit", "resume_job", "git_commit")}
-        | {"record_path": str(st.root() / ("job-" + jid + ".json")),
+        | {"record_path": str(st.root() / ("job-" + safe_jid + ".json")),
            "review_evidence": str(j.get("review_evidence") or "")[:1000],
            "acceptance": str(j.get("acceptance", ""))[:500],
            "error": str(j.get("error") or "")[:1000],
            "conversation": {k:v for k,v in (j.get("cli_session") or j.get("codex_session") or {}).items()
                             if k in {"status", "archive_path", "recoverable"}},
            "execution_terminal": j["status"] not in ACTIVE})
-    source = hashlib.sha256((str(st.root().resolve()) + ":" + session_id + (":" + scope if scope else "")).encode()).hexdigest()
-    packet = {"schema_version": 1, "source_id": source, "session_id": session_id,
+    source = hashlib.sha256((str(st.root().resolve()) + ":" + safe_sid + (":" + scope if scope else "")).encode()).hexdigest()
+    packet = {"schema_version": 1, "source_id": source, "session_id": safe_sid,
               "am_task_id": binding["task_id"], "next_step": state.get("handoff_steps", {}).get(scope, "") if scope else state.get("handoff_next", ""), "jobs": jobs,
               "jobs_total": len(selected), "jobs_omitted": max(0, len(selected) - len(jobs)),
-              "session_record_path": str(st.root() / ("session-" + session_id + ".json"))}
+              "session_record_path": str(st.root() / ("session-" + safe_sid + ".json"))}
     while len(json.dumps(packet)) > 900_000 and packet["jobs"]:
       packet["jobs"].pop(0)
       packet["jobs_omitted"] += 1
-    name = "handoff-" + st.key(session_id) + ("-" + scope if scope else "") + ".json"
+    name = "handoff-" + safe_sid + ("-" + st.key(scope) if scope else "") + ".json"
     outbox = st.read(name, {})
     prior = outbox.get("packet", {})
     if {k:v for k,v in prior.items() if k != "revision"} != packet:
@@ -141,5 +143,5 @@ def link(session_id: str, action: str = "report", am_task_id: str = "", am_root:
     raise ValueError("action must be bind/next/report/sync")
   result = _sync(session_id, scope) if scope else sync(session_id)
   if action == "report":
-    result["snapshot"] = st.read("handoff-" + session_id + ("-" + scope if scope else "") + ".json", {}).get("packet")
+    result["snapshot"] = st.read("handoff-" + st.key(session_id) + ("-" + st.key(scope) if scope else "") + ".json", {}).get("packet")
   return result

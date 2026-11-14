@@ -16,23 +16,60 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'plugins/delegate/s
 import runtime_image
 
 
-def backup(path):
+def backup(path: Path) -> Path | None:
+  """Create a 0o600 timestamped backup and keep at most three recent backups per file.
+
+  Args:
+    path: Existing target file to back up before overwriting.
+
+  Returns:
+    Path to the created backup file, or None if ``path`` does not exist.
+  """
   if path.exists():
-    target=path.with_name(path.name+'.delegate-backup-'+str(time.time_ns()))
-    shutil.copy2(path,target)
-    os.chmod(target,0o600)
+    target = path.with_name(path.name + '.delegate-backup-' + str(time.time_ns()))
+    shutil.copy2(path, target)
+    os.chmod(target, 0o600)
+    backups = sorted(
+      (p for p in path.parent.glob(path.name + '.delegate-backup-*') if p.is_file() and not p.is_symlink()),
+      key=lambda p: p.stat().st_mtime_ns,
+      reverse=True,
+    )
+    for stale in backups[3:]:
+      stale.unlink(missing_ok=True)
     return target
+  return None
 
 
-def link(source,target):
-  target.parent.mkdir(parents=True,exist_ok=True)
-  if target.is_symlink() and target.resolve()==source.resolve():return
-  if target.exists() or target.is_symlink():raise ValueError('Skill/launcher target already exists: '+str(target))
+def link(source: Path, target: Path) -> None:
+  """Symlink ``target`` to ``source`` idempotently without overwriting foreign files.
+
+  Args:
+    source: Repository skill directory.
+    target: Host skill symlink destination.
+
+  Raises:
+    ValueError: If ``target`` already exists and points elsewhere.
+  """
+  target.parent.mkdir(parents=True, exist_ok=True)
+  if target.is_symlink() and target.resolve() == source.resolve():
+    return
+  if target.exists() or target.is_symlink():
+    raise ValueError('Skill/launcher target already exists: ' + str(target))
   target.symlink_to(source)
 
 
-def profile_prefix(text):
-  """Normalize a supported empty patch list before appending a block-style overlay."""
+def profile_prefix(text: str) -> str:
+  """Normalize a supported empty patch list before appending a block-style overlay.
+
+  Args:
+    text: Existing YAML patch file contents.
+
+  Returns:
+    Normalized patch prefix text ready for overlay insertion.
+
+  Raises:
+    ValueError: If the patch file is not a block-style YAML sequence or empty list.
+  """
   meaningful = [line.split('#',1)[0].strip() for line in text.splitlines()]
   meaningful = [line for line in meaningful if line and line != '---']
   if not meaningful:
@@ -44,8 +81,18 @@ def profile_prefix(text):
   return text
 
 
-def preflight(repo, args, home, binary):
-  """Validate every selected host before changing even the shared launcher."""
+def preflight(repo: Path, args: argparse.Namespace, home: Path, binary: Path) -> None:
+  """Validate every selected host before changing even the shared launcher.
+
+  Args:
+    repo: Repository root directory.
+    args: Parsed CLI arguments.
+    home: User home directory.
+    binary: Target launcher binary path.
+
+  Raises:
+    ValueError: If host prerequisites fail or conflicting adapters already exist.
+  """
   if binary.is_symlink():raise ValueError('Refusing a symlinked launcher')
   if binary.exists() and '# managed by delegate host installer' not in binary.read_text():
     raise ValueError('Launcher already exists')
@@ -72,24 +119,26 @@ def preflight(repo, args, home, binary):
       raise ValueError('DSH delegate skill already exists')
 
 
-def main():
-  parser=argparse.ArgumentParser()
-  parser.add_argument('host',choices=['codex','dsh','all'])
-  parser.add_argument('--dsh-profile',default='web')
-  parser.add_argument('--refresh-launcher',action='store_true',help='Update only the managed launcher to a frozen runtime; preserve existing host configuration')
-  args=parser.parse_args()
-  repo=Path(__file__).resolve().parents[1]
-  home=Path.home()
-  binary=home/'.local/bin/delegate-agent'
+def main() -> None:
+  """Install or refresh managed Codex and DSH host adapters for delegate."""
+  parser = argparse.ArgumentParser()
+  parser.add_argument('host', choices=['codex', 'dsh', 'all'])
+  parser.add_argument('--dsh-profile', default='web')
+  parser.add_argument('--refresh-launcher', action='store_true',
+                      help='Update only the managed launcher to a frozen runtime; preserve existing host configuration')
+  args = parser.parse_args()
+  repo = Path(__file__).resolve().parents[1]
+  home = Path.home()
+  binary = home / '.local/bin/delegate-agent'
   if args.refresh_launcher:
     if binary.is_symlink() or not binary.is_file() or '# managed by delegate host installer' not in binary.read_text():
       raise ValueError('Only an existing managed launcher can be refreshed')
   else:
-    preflight(repo,args,home,binary)
-  image=runtime_image.freeze(repo/'plugins/delegate/scripts')
-  entry=Path(image['path'])/'delegate.py'
-  binary.parent.mkdir(parents=True,exist_ok=True)
-  text='#!/bin/sh\n# managed by delegate host installer\nexec '+shlex.quote(sys.executable)+' '+shlex.quote(str(entry))+' cli "$@"\n'
+    preflight(repo, args, home, binary)
+  image = runtime_image.freeze(repo / 'plugins/delegate/scripts')
+  entry = Path(image['path']) / 'delegate.py'
+  binary.parent.mkdir(parents=True, exist_ok=True)
+  text = '#!/bin/sh\n# managed by delegate host installer\nexec ' + shlex.quote(sys.executable) + ' -B ' + shlex.quote(str(entry)) + ' cli "$@"\n'
   if binary.exists() and binary.read_text()!=text:
     if '# managed by delegate host installer' not in binary.read_text():raise ValueError('Launcher already exists')
     backup(binary)

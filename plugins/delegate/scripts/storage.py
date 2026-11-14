@@ -84,6 +84,23 @@ def locked() -> Iterator[None]:
     yield
 
 
+def lock_path(name: str) -> Path:
+  """Return a dedicated lock-file path inside ``locks/`` for per-entity coordination.
+
+  Args:
+    name: Safe single-segment lock identifier.
+
+  Returns:
+    Path to the lock file inside ``root() / "locks"``.
+
+  Raises:
+    ValueError: If ``name`` is not a safe identifier.
+  """
+  locks = root() / "locks"
+  locks.mkdir(mode=0o700, exist_ok=True)
+  return locks / (key(name) + ".lock")
+
+
 def config() -> dict[str, Any]:
   """Return installed configuration or the conservative built-in defaults."""
   return read("config.json", DEFAULT_CONFIG)

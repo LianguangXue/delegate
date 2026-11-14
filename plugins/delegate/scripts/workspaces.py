@@ -9,7 +9,7 @@ import time
 
 import storage as st
 import source_inputs
-from lifecycle import identity, stop_owned, group_running
+from lifecycle import group_running, has_active_group, identity, mark_helper, stop_owned
 
 DEFAULT_TIMEOUT = 600
 _CLEANUP = ContextVar("delegate_workspace_cleanup", default=False)
@@ -25,16 +25,16 @@ def run(job_id: str, cwd: str, *args: str, timeout: float | None = None,
     raise InterruptedError("Workspace preparation cancelled")
   env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_") or k.startswith(("GIT_AUTHOR_", "GIT_COMMITTER_"))}
   command = ["git", "-C", cwd, *args]
-  st.update_job(job_id, backend_starting=True, phase=phase, heartbeat=time.time())
+  mark_helper(job_id, True, phase=phase, heartbeat=time.time())
   try:
     proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             env=env, text=True, start_new_session=True)
   except OSError:
-    st.update_job(job_id, backend_starting=False)
+    mark_helper(job_id, False)
     raise
   record = identity(proc.pid, include_zombies=True)
   try:
-    st.update_job(job_id, backend_starting=False, backend_identity=record, workspace_git_identity=record)
+    mark_helper(job_id, False, record, workspace_git_identity=record)
     if args[:2] == ("worktree", "add"):
       receipt(job_id, checkout_identity=record)
     until = time.monotonic() + seconds
@@ -213,7 +213,7 @@ def prepare(value: dict[str, Any]) -> str:
     return str(cwd)
   except BaseException:
     current = st.job(job_id)
-    if current.get("backend_starting") or group_running(current.get("backend_identity")):
+    if has_active_group(current):
       receipt(job_id, status="cleanup-unconfirmed", recovery="Checkout process still running; inspect before cleanup")
     else:
       rollback(job_id, str(top), target)

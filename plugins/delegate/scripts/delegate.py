@@ -71,7 +71,7 @@ DESCRIPTIONS = {
     "Unknown Claude quota defaults to conserving main capacity in auto mode; off/manual remain unchanged. "
     "Low quota means delegate whole independent stages to allowed external agents, not just reviews. "
     "Native Claude subagents consume the same Claude quota. Model and effort remain per-task choices.",
-  "delegate_control": "Read or change THIS session's optional delegation. New sessions inherit the configured default; explicit session off overrides it. "
+  "delegate_control": "Read or change THIS session's optional delegation, or run action='gc' for a safe dry-run store garbage-collection inventory. New sessions inherit the configured default; explicit session off overrides it. "
     "Only explicit user on/off/manual requests change the mode; defaults are configured separately on user request. on allows automatic selection from the pool. "
     "Use the real session_id from the delegate hook or skill. Off leaves running jobs intact.",
   "delegate_catalog": "Discover ALL configured agent names and provider mappings. models/efforts belong to the selected provider (default codex); pass agent_name='deepseek-company-reviewer' to resolve its provider directly, or provider_name='deepseek-company'. Codex is live with TTL; "
@@ -163,6 +163,8 @@ def tool_list() -> list[dict[str, Any]]:
         "description": "Character offset from next_result_call; pass the matching result_sha256 for nonzero offsets."}
       properties["result_view"] = {"type": "string", "enum": ["auto", "page", "summary", "file"], "default": "auto",
         "description": "auto suppresses duplicate body; page explicitly rereads; summary never collects; file publishes the entire Markdown report without truncation or body echo."}
+    if name == "delegate_control":
+      properties["action"] = {"type": "string", "enum": ["status", "on", "off", "manual", "gc"], "default": "status"}
     if name == "delegate_loop":
       properties["action"] = {"type": "string", "enum": ["list", "start", "status", "watch", "inspect", "result",
         "verify", "tell", "pause", "cancel", "resume", "recover", "advance", "retry", "limits", "finish"]}
@@ -241,7 +243,11 @@ def hook(payload: dict[str, Any]) -> dict[str, Any]:
   if os.environ.get("DELEGATE_WORKER"):
     return {}
   session_id = payload.get("session_id")
-  if not session_id:
+  if not isinstance(session_id, str) or not session_id:
+    return {}
+  try:
+    st.key(session_id)
+  except ValueError:
     return {}
   event = payload.get("hook_event_name", "SessionStart")
   if event == "PreToolUse":
@@ -302,20 +308,19 @@ def hook(payload: dict[str, Any]) -> dict[str, Any]:
     notes.append("Delegate session_id=" + session_id + "; mode=" + state["mode"] +
                  "; strategy=" + state["strategy"] + "; allowed agents=" + json.dumps(state["agents"]) + ".")
     if state["mode"] == "auto":
-      notes.append("Delegation is enabled for this session; use it directly for substantial tasks without requesting activation again. A task usage ledger tracks this turn. For substantial independent "
-        "work first check the connected MCP delegate_control status server_runtime.version once per conversation; "
+      notes.append("Delegation is enabled for this session; use it directly for substantial tasks without requesting activation again. A task usage ledger tracks this turn. First check the connected MCP delegate_control status server_runtime.version once per conversation; "
         "this hook is version " + runtime_image.VERSION + ", which does not prove the connected MCP is current. "
         "If older or missing, use the installed delegate-agent call CLI with the same session_id, or a new session. "
         "Read referenced briefs before routing; declare required_files/output_files and shell needs. For dirty code "
-        "use selected source_inputs; for read-only analysis return the report text rather than requesting file writes. For substantial independent "
-        "work first reason about EACH subtask's kind/scope/uncertainty/risk/validation in this turn and pass task_profile; "
+        "use selected source_inputs; for read-only analysis return the report text rather than requesting file writes. "
+        "For substantial independent work first reason about EACH subtask's kind/scope/uncertainty/risk/validation in this turn and pass task_profile; "
         "do not ask another model to classify or label all children with the overall project's difficulty. "
         "Use ONE delegate_run(agent/model/effort='auto',category,task_profile,operation,work_item,notify=true) "
+        "with complexity omitted/auto to classify, plan, dispatch and wait; it may choose main instead. "
         "Follow task_assessment.orchestration: resolve uncertain interfaces before implementation; parallelize only ready independent units with disjoint writes; "
         "use targeted independent review for high-risk changes. Model preferences are soft; preserve scarce quota within the expected-work bound. "
-        "with complexity omitted/auto. Bounded fast work prefers Terra/DeepSeek Flash, daily implementation Sol, "
-        "demanding or high-risk reasoning Astra. Tests/replay require shell-capable roles. "
-        "to classify, plan, dispatch and wait; it may choose main instead. Avoid separate planning/polling calls "
+        "Bounded fast work prefers Terra/DeepSeek Flash, daily implementation Sol, demanding or high-risk reasoning Astra. "
+        "Tests/replay require shell-capable roles. Avoid separate planning/polling calls "
         "unless needed. Tiny tasks should stay in main with no planning calls. Resume failed work rather than "
         "copying context. After inspecting actual results call delegate_task finish with accepted_jobs and evidence "
         "to combine child and parent acceptance. Stop records final-response usage. "
@@ -333,11 +338,21 @@ def hook(payload: dict[str, Any]) -> dict[str, Any]:
         current = st.session(session_id)
         current["routing_signature"] = signature
         st.save_session(session_id, current)
-  for job_id in state["jobs"]:
-    service.reconcile(job_id)
+  candidates = list(state["pending_jobs"]) if "pending_jobs" in state else list(state["jobs"])
+  settled: set[str] = set()
+  for job_id in candidates:
+    reconciled = service.reconcile(job_id)
     note = delivery.notice(job_id, force=event == "SessionStart")
     if note:
       notes.append(note)
+    if reconciled["status"] not in service.ACTIVE and reconciled.get("collected_at"):
+      settled.add(job_id)
+  if settled and "pending_jobs" in state:
+    with st.locked():
+      current = st.session(session_id)
+      if "pending_jobs" in current:
+        current["pending_jobs"] = [jid for jid in current["pending_jobs"] if jid not in settled]
+        st.save_session(session_id, current)
   if not notes and rewritten_output is None:
     return {}
   output = {"hookEventName": event}
@@ -350,12 +365,19 @@ def hook(payload: dict[str, Any]) -> dict[str, Any]:
 
 def statusline(payload: dict[str, Any]) -> str:
   """Collect real quota and show the enabled session's routing pressure without inference."""
-  sample = budget.capture(payload)
-  if payload.get("session_id"):
-    sample = budget.read_claude(payload["session_id"])
+  raw_sid = payload.get("session_id")
+  sid = None
+  if isinstance(raw_sid, str) and raw_sid:
+    try:
+      sid = st.key(raw_sid)
+    except ValueError:
+      sid = None
+  safe_payload = payload if sid == raw_sid else {k: v for k, v in payload.items() if k != "session_id"}
+  sample = budget.capture(safe_payload)
+  if sid:
+    sample = budget.read_claude(sid)
   value = budget.remaining(sample, "claude")
   label = "unknown" if value is None else str(round(value, 1)) + "% left"
-  sid = payload.get("session_id")
   if sid and st.session(sid)["mode"] == "auto":
     return "Delegate: " + budget.recommendation(sid)["mode"] + " | Claude quota: " + label
   return "Claude quota: " + label

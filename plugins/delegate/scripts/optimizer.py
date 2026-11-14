@@ -81,6 +81,14 @@ def role_pair(role: dict[str, Any], provider: dict[str, Any], catalog: dict[str,
 
 def tier(model: str, description: str = "") -> int:
   """Classify known model families for bootstrap selection, not as measured quality ratings."""
+  overrides = st.config().get("model_tiers") or {}
+  if isinstance(overrides, dict):
+    if model in overrides and type(overrides[model]) is int and 0 <= overrides[model] <= 2:
+      return overrides[model]
+    lowered = model.lower()
+    for key, level in overrides.items():
+      if isinstance(key, str) and type(level) is int and 0 <= level <= 2 and key.lower() in lowered:
+        return level
   name = (model + " " + description).lower()
   if policy.family(model) == "terra":
     return 0  # Fast workflow lane; not a benchmark of intrinsic model quality.
@@ -368,6 +376,7 @@ def plan(session_id: str, work_item: str = "main", operation: str = "read",
                     if source == "empirical" else startup + handoff + main_tokens)
         quota_pressure = pressures[provider_name]
         candidates.append({"action": "delegate", "agent": name, "provider": provider_name, "model": model,
+          "provider_default": bool(provider.get("is_default")),
           "model_family": policy.family(model), "preference_rank": policy.preference(model, lane),
           "routing_lane": lane, "minimum_capability_tier": desired_tier,
           "execution_profile": execution["profile"],

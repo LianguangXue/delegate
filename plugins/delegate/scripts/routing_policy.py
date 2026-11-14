@@ -50,7 +50,9 @@ def select(candidates: list[dict[str, Any]], desired_tier: int) -> tuple[dict[st
     tier = candidate["capability_tier"]
     remaining = quota.get("remaining_percent")
     return (abs((tier if tier is not None else desired_tier) - desired_tier),
-      candidate.get("preference_rank", 0), -quota.get("surplus_priority", 0),
+      candidate.get("preference_rank", 0),
+      not candidate.get("provider_default", False),
+      -quota.get("surplus_priority", 0),
       -(remaining if remaining is not None else -1), candidate["expected_processed_tokens"])
   chosen = min(close, key=rank)
   return chosen, {**SELECTION_POLICY, "eligible_candidates": len(candidates), "within_cost_band": len(close) + len(deferred),
@@ -89,7 +91,7 @@ def normalize(profile: dict[str, Any] | None) -> dict[str, Any] | None:
     raise ValueError("task_profile.requires_shell must be boolean")
   reason = profile.get("reason", "")
   if not isinstance(reason, str) or len(reason) > 600:
-    raise ValueError("task_profile.reason must be text up to600 characters")
+    raise ValueError("task_profile.reason must be text up to 600 characters")
   return {**profile, "requires_shell": profile.get("requires_shell", False), "reason": reason}
 
 

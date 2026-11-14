@@ -57,15 +57,17 @@ def parse_usage(output: str) -> dict[str, Any]:
         try:
           zone = ZoneInfo(date[2])
           now = datetime.now(zone)
-          for fmt in ("%b %d, %I:%M%p", "%b %d, %I%p"):
-            try:
-              reset = datetime.strptime(date[1], fmt).replace(year=now.year, tzinfo=zone)
-              if reset < now - timedelta(days=180):
-                reset = reset.replace(year=now.year + 1)
-              window["resets_at"] = reset.timestamp()
+          for fmt in ("%Y %b %d, %I:%M%p", "%Y %b %d, %I%p"):
+            for year in (now.year, now.year + 1):
+              try:
+                reset = datetime.strptime(f"{year} {date[1]}", fmt).replace(tzinfo=zone)
+              except ValueError:
+                continue
+              if reset >= now - timedelta(days=180):
+                window["resets_at"] = reset.timestamp()
+                break
+            if "resets_at" in window:
               break
-            except ValueError:
-              continue
         except (KeyError, ValueError):
           pass
     windows[name] = window
@@ -91,7 +93,7 @@ def native_usage(command: str, env: dict[str, str]) -> tuple[int, str]:
 
 def refresh_cli(force: bool = False) -> dict[str, Any]:
   """Read the native usage command with no inference, hooks, plugins or session persistence."""
-  with (st.root() / "claude-usage-refresh.lock").open("a") as lock:
+  with st.lock_path("claude-usage-refresh").open("a") as lock:
     try:
       fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:

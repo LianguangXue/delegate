@@ -13,6 +13,7 @@ import tomllib
 from pathlib import Path
 from lifecycle import identity, stop_owned
 from diagnostics import StderrCapture, secrets
+import runtime_image
 
 
 class CodexRPC:
@@ -63,7 +64,7 @@ class CodexRPC:
       self.reader = threading.Thread(target=self._reader, daemon=True)
       self.reader.start()
       os.set_blocking(self.proc.stdin.fileno(), False)
-      self.call("initialize", {"clientInfo": {"name": "claude_delegate", "version": "0.23.0"},
+      self.call("initialize", {"clientInfo": {"name": "claude_delegate", "version": runtime_image.VERSION},
                                "capabilities": {"experimentalApi": True}})
       self.send({"method": "initialized", "params": {}})
     except BaseException:
