@@ -3,6 +3,20 @@
 This publication bundles the changes since the earlier 0.12.0 snapshot. Version
 numbers below describe implementation milestones, not separately published Git tags.
 
+## delegate 0.24.0
+- Keep eligible models through expected-work estimation; family preferences no longer
+  erase quota/cost alternatives or hide empirical candidates beyond the first four rows.
+- Within the existing 15% expected-token band, preserve known scarce quota when a healthy
+  alternative exists; unknown quota remains unknown. Reserve checks cover all known
+  percentage providers; limiting-window pressure includes Claude spend limits.
+- Scoped low-risk, low-uncertainty implementation with explicit tests can use the fast
+  lane; missing tests or higher risk retain the workhorse/frontier floor.
+- Assessments include parent-applied staged execution, risk-based review and compact
+  handoff/wait guidance. No classifier calls, automatic workflow launches or new grants.
+- Validation: 373 regression tests plus final targeted planner checks and independent
+  review. Installed CLI replay covers six task/quota scenarios with network and model
+  subprocess calls blocked. These establish routing behavior, not measured billing savings.
+
 ## delegate 0.23.2
 - Task update accepts inspected successful children with accepted_jobs/evidence, without
   changing the parent's classification or closing it. The entire batch is validated

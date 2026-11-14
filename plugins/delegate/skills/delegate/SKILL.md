@@ -378,3 +378,18 @@ retain their separate authorization requirements. /delegate off overrides the mo
 for the current session. Changing defaults affects only new sessions, not saved off.
 To change the global preference on user request: delegate_configure(section="defaults",
 value={"default_mode":"auto"|"off"|"manual"}). A model must never enable it itself.
+
+## Whole-task orchestration
+
+Apply assessment.orchestration/task_assessment.orchestration in the parent turn. Resolve
+uncertain interfaces first, then reassess bounded implementation and validation stages.
+Give one owner the complete bounded unit; parallelize only ready independent work with
+disjoint writes within configured concurrency. Use targeted independent review for high-risk
+changes or when project rules require it; otherwise prefer deterministic checks and parent
+acceptance. Do not add repeated reviewers without a concrete remaining question. Pass
+decisions and artifact paths rather than whole transcripts; resume local corrections in the
+existing owner when appropriate. Missing inputs or infrastructure failures need repair before
+model escalation. Use program waiters and avoid repeating the worker's implementation in main.
+Model preferences are soft: inspect selection_policy/candidates for token and quota tradeoffs.
+Unknown quota is not surplus, API balance is not subscription percentage, and same-provider
+workers may share quota. Recommendations do not create a scheduler or authorize new accounts.

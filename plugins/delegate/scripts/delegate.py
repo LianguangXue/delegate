@@ -60,6 +60,8 @@ DESCRIPTIONS = {
     "case_key must identify identical frozen inputs/acceptance for baseline vs optimized. "
     "token_budget stops subsequent dispatch after measured usage reaches it, not a hard in-flight token cap.",
   "delegate_plan": "First assess each SUBTASK in this turn with task_profile (kind, scope, uncertainty, risk, validation, optional requires_shell/reason). Omit complexity or use auto to derive it; a supplied complexity is a minimum. Do not copy the whole project's complexity onto every item or run another model just to classify. Fast bounded work prefers Terra/DeepSeek Flash, everyday work Sol, demanding work Astra; supported capability/effort, quotas, roles and retry floors still apply. "
+    "Follow assessment.orchestration: resolve unknown interfaces before fanout, assign whole bounded units, independently review high-risk changes. "
+    "Model preferences are soft: selection_policy compares expected work and known quota pressure before preferences; inspect candidates for alternatives. "
     "Choose main or a concrete agent/model/effort from task complexity, measured history, "
     "allowed pool and quota reset headroom. Pass subtask complexity/category per work_item; omitted values inherit the same work item or parent. Tiny tasks stay in main. "
     "Use a stable work_item across retries, different IDs for independent stages. Pass returned plan id to "
@@ -309,6 +311,8 @@ def hook(payload: dict[str, Any]) -> dict[str, Any]:
         "work first reason about EACH subtask's kind/scope/uncertainty/risk/validation in this turn and pass task_profile; "
         "do not ask another model to classify or label all children with the overall project's difficulty. "
         "Use ONE delegate_run(agent/model/effort='auto',category,task_profile,operation,work_item,notify=true) "
+        "Follow task_assessment.orchestration: resolve uncertain interfaces before implementation; parallelize only ready independent units with disjoint writes; "
+        "use targeted independent review for high-risk changes. Model preferences are soft; preserve scarce quota within the expected-work bound. "
         "with complexity omitted/auto. Bounded fast work prefers Terra/DeepSeek Flash, daily implementation Sol, "
         "demanding or high-risk reasoning Astra. Tests/replay require shell-capable roles. "
         "to classify, plan, dispatch and wait; it may choose main instead. Avoid separate planning/polling calls "

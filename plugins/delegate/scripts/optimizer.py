@@ -98,7 +98,7 @@ def pressure(sample: dict[str, Any], provider: str) -> dict[str, Any]:
   remaining = budget.remaining(sample, provider)
   data = sample.get("data") or {}
   windows = [(data.get("rateLimits") or {}).get(k) for k in ("primary", "secondary")] if provider == "codex" else [
-    data.get(k) for k in ("five_hour", "seven_day")]
+    data.get(k) for k in ("five_hour", "seven_day", "spend_limit")]
   limiting = [w for w in windows if isinstance(w, dict)
               and remaining is not None
               and w.get("usedPercent", w.get("used_percentage")) == 100 - remaining]
@@ -322,6 +322,10 @@ def plan(session_id: str, work_item: str = "main", operation: str = "read",
       catalog, quota = catalogs[provider_name], quotas[provider_name]
       if provider["kind"] == "codex":
         service.check_quota(quota, cfg["quota_reserve_percent"])
+      available = pressures[provider_name]["remaining_percent"]
+      if available is not None and available <= cfg["quota_reserve_percent"]:
+        errors[provider_name] = "Known quota is at or below the configured reserve"
+        continue
       if quota.get("data", {}).get("is_available") is False:
         continue
       rows = catalog["models"] if provider["kind"] == "codex" else [
@@ -354,9 +358,7 @@ def plan(session_id: str, work_item: str = "main", operation: str = "read",
         options.append((abs(model_tier - desired_tier), model, effort, model_tier))
       if not options:
         continue
-      best_distance = min(o[0] for o in options)
-      shortlist = sorted([o for o in options if o[0] == best_distance], key=lambda option: policy.preference(option[1], lane))
-      for _, model, effort, model_tier in shortlist[:4]:
+      for _, model, effort, model_tier in options:
         observed = observations(task, name, model, effort, history)
         source = "empirical" if (task["category"] != "general" and observed["attempts"] >= 3 and observed["cost_samples"] == observed["attempts"]
                                   and not observed["unreviewed"]) else "bootstrap"
@@ -395,29 +397,25 @@ def plan(session_id: str, work_item: str = "main", operation: str = "read",
   # fast models; standard/complex work requires the matching capability floor.
   if task["complexity"] == "simple" and main_tokens <= 3000 and main in candidates and not previous_jobs:
     candidates = [main]
-  else:
-    distance = min(abs((c["capability_tier"] if c["capability_tier"] is not None else desired_tier) - desired_tier)
-                   for c in candidates)
-    candidates = [c for c in candidates if abs(
-      (c["capability_tier"] if c["capability_tier"] is not None else desired_tier) - desired_tier) == distance]
-  delegates = [c for c in candidates if c["action"] == "delegate"]
-  if delegates:
-    preferred = min(c["preference_rank"] for c in delegates)
-    candidates = [c for c in candidates if c["action"] != "delegate" or c["preference_rank"] == preferred]
-  best_cost = min(c["expected_processed_tokens"] for c in candidates)
-  # Bounded tradeoff: surplus can win only among candidates within 15% of best token estimate.
-  close = [c for c in candidates if c["expected_processed_tokens"] <= best_cost * 1.15]
-  selected = min(close, key=lambda c: (-c["quota"]["surplus_priority"], c["expected_processed_tokens"]))
+  elif main in candidates and parent_tier is not None and parent_tier > desired_tier and any(
+      c["action"] == "delegate" and c["capability_tier"] == desired_tier for c in candidates):
+    candidates.remove(main)  # Preserve the stronger parent for reasoning rather than substantial lower-tier execution.
+    reserve_main = True
+  selected, selection_policy = policy.select(candidates, desired_tier)
   result = {**selected, "id": "p" + uuid.uuid4().hex[:16], "session_id": session_id, "task_id": task["id"],
             "cwd": cwd, "required_files": required_files, "output_files": output_files,
             "assessment": assessment,
             "requirements": capabilities.normalize(requirements),
             "work_item": work_item, "complexity": task["complexity"], "category": task["category"],
             "created_at": time.time(), "operation": operation,
-            "reason": "Subtask capability and effort first, then expected work and quota headroom",
+            "reason": "Meet capability and reserve constraints, bound expected work, preserve scarce quota, then apply model preferences",
+            "selection_policy": selection_policy,
+            "parent_reserved": reserve_main,
+            "parent_in_cost_comparison": main in candidates,
             "capability_basis": "model family/catalog description heuristic, not a measured cross-provider quality ranking",
             "scope": "token-volume heuristic; not a claim about billed cost or optimal quality",
-            "candidates": sorted(candidates, key=lambda c: c["expected_processed_tokens"])[:5], "errors": errors}
+            "candidates": [selected] + sorted([c for c in candidates if c is not selected],
+              key=lambda c: c["expected_processed_tokens"])[:4], "errors": errors}
   st.write("plan-" + result["id"] + ".json", result)
   return result
 

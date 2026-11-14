@@ -1,8 +1,11 @@
 # 快速安装：Claude Code、Codex、DeepSeek Harness
 
-当前实现：delegate 0.23.2；可选 am 0.4.0+。运行环境：Linux、Python 3.12+。
+当前实现：delegate 0.24.0；可选 am 0.4.0+。运行环境：Linux、Python 3.12+。
 只安装你需要的入口即可，不必装齐所有模型。Python 核心无需第三方包。
 本文不包含或要求上传任何 API Key。
+
+0.24 更新自动选型和阶段编排：[额度与智能](ORCHESTRATION.zh-CN.md)。模型偏好服从
+合格能力、预计工作量和已知额度压力；主会话按阶段执行建议，不增加分类调用。
 
 0.23 为 CLI 增加 --help／doctor／输入文件、全文导出和简短 verify。旧 MCP 无法使用
 source_inputs 时，沿用原 session_id 统一走当前 CLI。[打包的完整指南](../plugins/delegate/skills/delegate/references/cli.md)。

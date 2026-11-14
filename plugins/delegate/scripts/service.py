@@ -163,6 +163,7 @@ def control(session_id: str, action: str = "status", agents: list[str] | None = 
           "execution_profiles": {"default": "sandboxed", "available": sorted(capabilities.PROFILES),
             "authorization": "Per-role execution_profiles; host requires explicit selection and a worktree role. No automatic escalation."},
           "model_policy": {"preferences": policy.PREFERENCES, "max_auto_effort": policy.MAX_AUTO_EFFORT,
+            "selection": policy.SELECTION_POLICY,
             "assessment": "Parent reasons once using task_profile; no classifier model call. Explicit model/effort remain authoritative."},
           "persistent_tasks": state.get("loops", []),
           "routing": ({"mode":"host-aware planning", "parent_provider":state.get("parent_provider") or "unknown"}
@@ -567,6 +568,9 @@ def _dispatch(session_id: str, agent: str, model: str, effort: str, task: str, a
     raise ValueError("Provider recently reported this model's limit: " + str(quota_snapshot.get("reason")))
   if provider["kind"] == "codex":
     check_quota(quota_snapshot, cfg["quota_reserve_percent"])
+  available = budget.remaining(quota_snapshot, "codex" if provider["kind"] == "codex" else "claude")
+  if available is not None and available <= cfg["quota_reserve_percent"]:
+    raise ValueError("Known quota is at or below the configured reserve; choose another allowed provider or wait")
   if provider["kind"] == "anthropic":
     credentials.environment(provider)
     if quota_snapshot.get("status") == "known" and quota_snapshot.get("data", {}).get("is_available") is False:
