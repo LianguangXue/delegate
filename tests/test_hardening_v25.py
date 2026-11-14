@@ -42,15 +42,15 @@ class HardeningV25Tests(unittest.TestCase):
     self.temp.cleanup()
 
   def test_runtime_image_version_and_readonly_permissions(self) -> None:
-    self.assertEqual(runtime_image.VERSION, "0.25.0")
+    self.assertEqual(runtime_image.VERSION, json.loads((SCRIPTS.parent / ".claude-plugin/plugin.json").read_text())["version"])
     image = runtime_image.freeze(SCRIPTS)
     image_dir = Path(image["path"])
     manifest = json.loads((image_dir / "runtime-image.json").read_text())
-    self.assertEqual(manifest["version"], "0.25.0")
+    self.assertEqual(manifest["version"], runtime_image.VERSION)
     self.assertEqual(stat.S_IMODE(image_dir.stat().st_mode), 0o500)
     self.assertEqual(stat.S_IMODE((image_dir / "runtime-image.json").stat().st_mode), 0o400)
     runtime_image._VERSIONS.pop(image["digest"], None)
-    self.assertEqual(runtime_image.job_version({"runtime_image": image}), "0.25.0")
+    self.assertEqual(runtime_image.job_version({"runtime_image": image}), runtime_image.VERSION)
 
   def test_registration_wal_cleanup_pending_jobs_and_hook_sanitization(self) -> None:
     sid = "sess_v25_wal"
@@ -195,8 +195,9 @@ class HardeningV25Tests(unittest.TestCase):
       self.assertEqual(dry["counts"]["deliveries"], 1)
       self.assertEqual(dry["counts"]["logs"], 1)
       self.assertEqual(dry["counts"]["wal"], 1)
-      self.assertEqual(dry["counts"]["locks"], 1)
-      self.assertEqual(dry["counts"]["runtimes"], 1)
+      self.assertEqual(dry["counts"]["locks"], 0)
+      self.assertEqual(dry["counts"]["runtimes"], 0)
+      self.assertEqual(dry["counts"]["runtimes_retained"], 1)
       self.assertTrue((st.root() / ("job-" + expired_job["id"] + ".json")).exists())
 
       applied = gc_store.collect_garbage(apply=True, retention_days=14)
@@ -208,8 +209,8 @@ class HardeningV25Tests(unittest.TestCase):
     self.assertFalse((st.root() / ("delivery-" + expired_job["id"] + ".json")).exists())
     self.assertFalse((st.root() / ("stderr-" + expired_job["id"] + ".txt")).exists())
     self.assertFalse(orphan_wal.exists())
-    self.assertFalse(stale_lock.exists())
-    self.assertFalse(old_runtime.exists())
+    self.assertTrue(stale_lock.exists())
+    self.assertTrue(old_runtime.exists())
     # Protected artifacts remain intact.
     self.assertTrue((st.root() / ("job-" + open_task_job["id"] + ".json")).exists())
     self.assertTrue((st.root() / ("job-" + uncollected_job["id"] + ".json")).exists())

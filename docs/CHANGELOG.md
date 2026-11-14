@@ -3,6 +3,20 @@
 This publication bundles the changes since the earlier 0.12.0 snapshot. Version
 numbers below describe implementation milestones, not separately published Git tags.
 
+## delegate 0.25.1
+- Coordinate root and locks/ lock files together so immutable older runtimes remain
+  mutually exclusive with new callers. Partial acquisition is released on failure.
+- GC retains coordination lock inodes and frozen runtimes. An idle flock or an image's
+  age cannot prove no live/queued/older process will use it. Retained loops protect
+  resume children independently of execution status; no real-store migration is needed.
+- Pending notifications discover legacy registrations through the authoritative jobs
+  index while avoiding repeated reconciliation of already-settled history. Concurrent
+  registrations remain pending when a hook prunes its processed snapshot.
+- See [GC scope and mixed versions](GC.zh-CN.md). Existing processes keep their code;
+  use the new CLI for GC and restart old MCP connections when their work permits.
+- Validation: 389 tests, independent review and installed CLI/hook fixtures covering
+  both lock paths, retained runtimes and legacy notifications. No real-store GC or model calls.
+
 ## delegate 0.25.0
 - Harden runtime image publishing (`runtime-image.json` version stamp, read-only permissions
   before atomic rename, `-B` launcher/bootstrap flags) and align `codex_rpc` `clientInfo`

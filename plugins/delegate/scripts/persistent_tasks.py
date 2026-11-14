@@ -3,7 +3,6 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Iterator
-import fcntl
 import hashlib
 import inspect
 import json
@@ -393,10 +392,9 @@ def tick(loop_id: str) -> bool:
 def run(loop_id: str) -> None:
   """Own one restartable supervisor process; no model calls while sleeping or awaiting parent review."""
   os.umask(0o077)
-  lock = st.lock_path("loop-controller-" + st.key(loop_id))
-  with lock.open("a") as stream:
+  with st.coordination_files("loop-controller-" + st.key(loop_id)) as streams:
     try:
-      fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+      st.try_coordination_lock(streams)
     except BlockingIOError:
       return
     runtime_image.require_worker(load(loop_id), Path(__file__).resolve().parent)
@@ -498,10 +496,9 @@ def watch(payload: dict[str, Any]) -> bool:
   loop = load(lid)
   if loop["session_id"] != sid:
     return False
-  lock = st.lock_path("loop-rewake-" + st.key(lid))
-  with lock.open("a") as stream:
+  with st.coordination_files("loop-rewake-" + st.key(lid)) as streams:
     try:
-      fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+      st.try_coordination_lock(streams)
     except BlockingIOError:
       return False
     after = (response or {}).get("notice_after", loop.get("ack_seq", 0))

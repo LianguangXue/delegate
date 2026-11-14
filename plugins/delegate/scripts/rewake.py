@@ -1,5 +1,4 @@
 """Wake the owning Claude session when a dispatched plugin job reaches a terminal state."""
-import fcntl
 import json
 import sys
 import time
@@ -242,10 +241,9 @@ def watch(payload: dict[str, Any]) -> bool:
   if job.get("session_id") != sid:
     return False
   # Concurrent duplicate hooks cannot notify the same live job simultaneously.
-  lock = st.lock_path("rewake-" + st.key(jid))
-  with lock.open("a") as stream:
+  with st.coordination_files("rewake-" + st.key(jid)) as streams:
     try:
-      fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+      st.try_coordination_lock(streams)
     except BlockingIOError:
       return False
     token = completion.register(jid, "claude-asyncRewake")

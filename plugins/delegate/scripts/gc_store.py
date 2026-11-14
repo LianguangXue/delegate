@@ -1,18 +1,14 @@
 """Conservative, dry-run-first garbage collection for the delegate state store."""
 from pathlib import Path
 from typing import Any
-import fcntl
 import os
 import re
 import shlex
-import shutil
 import time
 
 from lifecycle import ACTIVE
 import runtime_image
 import storage as st
-
-_LIVE_LOOP_STATUSES = {"ready", "pending", "queued", "running", "paused", "awaiting_review", "waiting", "blocked", "recovering"}
 
 
 def _launcher_runtime_digest() -> str | None:
@@ -41,36 +37,8 @@ def _current_source_digest() -> str | None:
     return None
 
 
-def _dir_size(path: Path) -> int:
-  """Compute total regular-file bytes inside ``path`` safely."""
-  total = 0
-  try:
-    for entry in path.rglob("*"):
-      try:
-        if entry.is_file() and not entry.is_symlink():
-          total += entry.stat().st_size
-      except OSError:
-        continue
-  except OSError:
-    pass
-  return total
-
-
-def _lock_is_idle(path: Path) -> bool:
-  """Return True when an advisory lock file is not currently held by any process."""
-  try:
-    with path.open("a") as stream:
-      try:
-        fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-      except BlockingIOError:
-        return False
-      return True
-  except OSError:
-    return False
-
-
 def collect_garbage(apply: bool = False, retention_days: int = 14) -> dict[str, Any]:
-  """Inspect or remove expired terminal state, orphaned WAL files, stale locks, and unused runtimes.
+  """Inspect or remove expired terminal state and orphaned WAL; preserve coordination locks and runtimes.
 
   Args:
     apply: When False (default), return a dry-run inventory without deleting files.
@@ -108,14 +76,18 @@ def collect_garbage(apply: bool = False, retention_days: int = 14) -> dict[str, 
       if loop_path.is_symlink() or not loop_path.is_file():
         continue
       loop = st.read(loop_path.name)
-      if not isinstance(loop, dict) or loop.get("status") in _LIVE_LOOP_STATUSES:
-        if isinstance(loop, dict):
-          for field in ("current_job", "previous_job"):
-            if isinstance(loop.get(field), str) and loop[field]:
-              protected_jobs.add(loop[field])
-          for child in loop.get("children", []) if isinstance(loop.get("children"), list) else []:
-            if isinstance(child, dict) and isinstance(child.get("id"), str) and child["id"]:
-              protected_jobs.add(child["id"])
+      if not isinstance(loop, dict):
+        continue
+      # All retained loop states can be resumed or extended, including completed loops.
+      digest = (loop.get("runtime_image") or {}).get("digest")
+      if isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest):
+        protected_digests.add(digest)
+      for field in ("current_job", "previous_job"):
+        if isinstance(loop.get(field), str) and loop[field]:
+          protected_jobs.add(loop[field])
+      for child in loop.get("children", []) if isinstance(loop.get("children"), list) else []:
+        if isinstance(child, dict) and isinstance(child.get("id"), str) and child["id"]:
+          protected_jobs.add(child["id"])
 
     for task_path in sorted(root.glob("task-*.json")):
       if task_path.name == "task-index.json" or task_path.is_symlink() or not task_path.is_file():
@@ -129,7 +101,6 @@ def collect_garbage(apply: bool = False, retention_days: int = 14) -> dict[str, 
             protected_jobs.add(jid)
 
     file_targets: list[Path] = []
-    dir_targets: list[Path] = []
     removed_job_ids: set[str] = set()
     counts = {
       "jobs": 0,
@@ -139,6 +110,7 @@ def collect_garbage(apply: bool = False, retention_days: int = 14) -> dict[str, 
       "wal": 0,
       "locks": 0,
       "runtimes": 0,
+      "runtimes_retained": 0,
       "sessions_updated": 0,
       "tasks_updated": 0,
     }
@@ -205,19 +177,7 @@ def collect_garbage(apply: bool = False, retention_days: int = 14) -> dict[str, 
       except OSError:
         continue
 
-    lock_candidates = [p for p in sorted(root.glob("*.lock")) if p.name != "state.lock"]
-    locks_dir = root / "locks"
-    if locks_dir.is_dir():
-      lock_candidates.extend(sorted(locks_dir.glob("*.lock")))
-    for lock_path in lock_candidates:
-      if lock_path.is_symlink() or not lock_path.is_file():
-        continue
-      try:
-        if lock_path.stat().st_mtime < runtime_cutoff and _lock_is_idle(lock_path):
-          file_targets.append(lock_path)
-          counts["locks"] += 1
-      except OSError:
-        continue
+    # Lock inode identity must survive idle periods and waiting/older processes. Never unlink locks.
 
     runtimes_dir = root / "runtimes"
     if runtimes_dir.is_dir():
@@ -228,8 +188,9 @@ def collect_garbage(apply: bool = False, retention_days: int = 14) -> dict[str, 
           continue
         try:
           if entry.stat().st_mtime < runtime_cutoff:
-            dir_targets.append(entry)
-            counts["runtimes"] += 1
+            # Older immutable MCPs have no lifetime lease. An unreferenced image
+            # can still be needed for their next worker; age cannot prove it is unused.
+            counts["runtimes_retained"] += 1
         except OSError:
           continue
 
@@ -239,29 +200,11 @@ def collect_garbage(apply: bool = False, retention_days: int = 14) -> dict[str, 
         reclaimable_bytes += path.stat().st_size
       except OSError:
         continue
-    for dpath in dir_targets:
-      reclaimable_bytes += _dir_size(dpath)
 
-    samples = [str(p.relative_to(root)) for p in (file_targets + dir_targets)[:20]]
+    samples = [str(p.relative_to(root)) for p in file_targets[:20]]
     if apply:
       for path in file_targets:
         path.unlink(missing_ok=True)
-      for dpath in dir_targets:
-        try:
-          dpath.chmod(0o700)
-          for child in dpath.rglob("*"):
-            try:
-              if child.is_symlink():
-                continue
-              if child.is_dir():
-                child.chmod(0o700)
-              else:
-                child.chmod(0o600)
-            except OSError:
-              pass
-          shutil.rmtree(dpath, ignore_errors=True)
-        except OSError:
-          continue
       if removed_job_ids:
         for sess_path in sorted(root.glob("session-*.json")):
           if sess_path.is_symlink() or not sess_path.is_file():
@@ -294,6 +237,7 @@ def collect_garbage(apply: bool = False, retention_days: int = 14) -> dict[str, 
 
     return {
       "dry_run": not apply,
+      "preserved": "Coordination locks and frozen runtimes are retained; old processes may still depend on them",
       "retention_days": retention_days,
       "counts": counts,
       "reclaimable_bytes": reclaimable_bytes,

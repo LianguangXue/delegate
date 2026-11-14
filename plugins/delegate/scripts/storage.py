@@ -1,7 +1,7 @@
 """Small atomic JSON store; no database or recursive filesystem scans."""
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, TextIO
 import copy
 import fcntl
 import json
@@ -99,6 +99,27 @@ def lock_path(name: str) -> Path:
   locks = root() / "locks"
   locks.mkdir(mode=0o700, exist_ok=True)
   return locks / (key(name) + ".lock")
+
+
+@contextmanager
+def coordination_files(name: str) -> Iterator[list[TextIO]]:
+  """Open both historical lock paths so new callers coordinate with either immutable release."""
+  safe = key(name)
+  with ExitStack() as stack:
+    yield [stack.enter_context(path.open("a")) for path in (root() / (safe + ".lock"), lock_path(safe))]
+
+
+def try_coordination_lock(streams: list[TextIO]) -> None:
+  """Acquire both locks nonblocking in a fixed order, releasing partial acquisition on failure."""
+  acquired = []
+  try:
+    for stream in streams:
+      fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+      acquired.append(stream)
+  except BaseException:
+    for stream in reversed(acquired):
+      fcntl.flock(stream, fcntl.LOCK_UN)
+    raise
 
 
 def config() -> dict[str, Any]:

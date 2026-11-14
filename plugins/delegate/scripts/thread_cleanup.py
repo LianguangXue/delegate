@@ -3,7 +3,6 @@ from contextlib import contextmanager
 from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Iterator
-import fcntl
 import inspect
 import time
 
@@ -15,11 +14,11 @@ from lifecycle import ACTIVE, alive, group_running, has_active_group, identity, 
 @contextmanager
 def guard(thread_id: str, wait_seconds: float = 0) -> Iterator[None]:
   """Serialize resume registration and archival without holding the global JSON lock."""
-  with st.lock_path("thread-" + st.key(thread_id)).open("a") as stream:
+  with st.coordination_files("thread-" + st.key(thread_id)) as streams:
     deadline = time.monotonic() + wait_seconds
     while True:
       try:
-        fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        st.try_coordination_lock(streams)
         break
       except BlockingIOError:
         if time.monotonic() >= deadline:

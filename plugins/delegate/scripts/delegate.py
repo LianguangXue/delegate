@@ -338,7 +338,9 @@ def hook(payload: dict[str, Any]) -> dict[str, Any]:
         current = st.session(session_id)
         current["routing_signature"] = signature
         st.save_session(session_id, current)
-  candidates = list(state["pending_jobs"]) if "pending_jobs" in state else list(state["jobs"])
+  known = set(state.get("pending_jobs_seen", [])) if "pending_jobs" in state else set()
+  candidates = list(dict.fromkeys([*state.get("pending_jobs", []),
+    *(jid for jid in state["jobs"] if jid not in known)]))
   settled: set[str] = set()
   for job_id in candidates:
     reconciled = service.reconcile(job_id)
@@ -347,11 +349,16 @@ def hook(payload: dict[str, Any]) -> dict[str, Any]:
       notes.append(note)
     if reconciled["status"] not in service.ACTIVE and reconciled.get("collected_at"):
       settled.add(job_id)
-  if settled and "pending_jobs" in state:
+  if settled or state.get("pending_jobs_seen") != state["jobs"] or "pending_jobs" not in state:
     with st.locked():
       current = st.session(session_id)
-      if "pending_jobs" in current:
-        current["pending_jobs"] = [jid for jid in current["pending_jobs"] if jid not in settled]
+      seen = set(current.get("pending_jobs_seen", [])) if "pending_jobs" in current else set()
+      pending = list(dict.fromkeys([*current.get("pending_jobs", []),
+        *(jid for jid in current["jobs"] if jid not in seen)]))
+      pending = [jid for jid in pending if jid not in settled]
+      if current.get("pending_jobs") != pending or current.get("pending_jobs_seen") != current["jobs"]:
+        current["pending_jobs"] = pending
+        current["pending_jobs_seen"] = list(current["jobs"])
         st.save_session(session_id, current)
   if not notes and rewritten_output is None:
     return {}

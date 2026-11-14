@@ -2,7 +2,7 @@
 
 A shared delegation engine for Claude Code, Codex and DeepSeek Harness, with
 per-task model/effort, durable results and configured Claude/Codex/API workers.
-Version 0.25.0. Activation is configurable; new installations default off.
+Version 0.25.1. Activation is configurable; new installations default off.
 
 Quota-aware orchestration now compares all eligible models before soft family preferences.
 Bounded expected-work tradeoffs preserve scarce quotas, and each assessment includes

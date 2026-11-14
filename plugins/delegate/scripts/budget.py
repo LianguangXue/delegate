@@ -3,7 +3,6 @@ from typing import Any
 from pathlib import Path
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-import fcntl
 import json
 import math
 import os
@@ -93,9 +92,9 @@ def native_usage(command: str, env: dict[str, str]) -> tuple[int, str]:
 
 def refresh_cli(force: bool = False) -> dict[str, Any]:
   """Read the native usage command with no inference, hooks, plugins or session persistence."""
-  with st.lock_path("claude-usage-refresh").open("a") as lock:
+  with st.coordination_files("claude-usage-refresh") as streams:
     try:
-      fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+      st.try_coordination_lock(streams)
     except BlockingIOError:
       return read_claude()
     cached = st.read("claude-usage.json")
