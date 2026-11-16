@@ -639,7 +639,16 @@ def manage(session_id: str, action: str = "list", loop_id: str = "", mode: str =
         raise ValueError("Cycle limit reached; explicitly increase limits before advancing")
       if action == "retry" and (not current or (current["status"] == "completed" and current.get("review") != "needs-work")):
         raise ValueError("Retry requires failed execution or needs-work review; it retains the same cycle/work_item")
+    cfg = st.config()
+    policy_active = (cfg.get("model_policy", {}).get("mode") == "sol-first"
+      or bool(cfg.get("model_policy", {}).get("deny_models"))
+      or any(row.get("deny_models") for group in ("agents", "providers") for row in cfg[group].values()))
     spec = {**loop["run_spec"], **(run_spec or {})}
+    requires_new = policy_active or spec.get("snapshot_required_files") or spec.get("source_inputs_base") == "cwd" or spec.get("escalate")
+    if requires_new:
+      version = runtime_image.job_version(loop)
+      if version == "unknown" or tuple(map(int, version.split("."))) < (0, 26, 0):
+        raise ValueError("This persistent controller predates policy/input enforcement; preserve its results and create a current-runtime task before new inference")
     spec["cwd"] = str(Path(spec["cwd"]).resolve(strict=True))
     if loop.get("resolved_agent") and spec["cwd"] != loop["run_spec"]["cwd"]:
       raise ValueError("Persistent conversation retains its original source cwd")

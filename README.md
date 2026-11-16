@@ -2,7 +2,12 @@
 
 A shared delegation engine for Claude Code, Codex and DeepSeek Harness, with
 per-task model/effort, durable results and configured Claude/Codex/API workers.
-Version 0.25.1. Activation is configurable; new installations default off.
+Version 0.26.0. Activation is configurable; new installations default off.
+
+New launch admission checks catch old MCP connections before dispatch. Optional hard
+model exclusions and Astra escalation authorization apply before inference; builders can
+snapshot declared dirty inputs with an explicit path base. See
+[version, model and input admission](docs/ADMISSION.zh-CN.md).
 
 Quota-aware orchestration now compares all eligible models before soft family preferences.
 Bounded expected-work tradeoffs preserve scarce quotas, and each assessment includes

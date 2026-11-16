@@ -163,3 +163,16 @@ def verify(value: dict[str, Any], target: Path) -> bool:
     elif item is None or hashlib.sha256(item[0]).hexdigest() != row["sha256"] or item[1] != row["mode"]:
       return False
   return True
+
+
+def repository_paths(root: Path, cwd: Path, paths: list[str], base: str = 'repo') -> list[str]:
+  """Normalize explicit paths lexically; capture still rejects symlinks and credentials."""
+  anchor = cwd if base == 'cwd' else root
+  result = []
+  for name in paths:
+    path = Path(os.path.abspath(anchor / name))
+    try:
+      result.append(path.relative_to(root).as_posix())
+    except ValueError:
+      raise ValueError('Snapshot input must be inside the repository: ' + name) from None
+  return validate(result or None)

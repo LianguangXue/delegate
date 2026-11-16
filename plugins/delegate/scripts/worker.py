@@ -13,6 +13,7 @@ import uuid
 import tempfile
 
 import storage as st
+import dispatch_policy
 from codex_rpc import CodexRPC
 from lifecycle import identity, group_running, has_active_group, stop_owned
 import thread_cleanup
@@ -235,6 +236,7 @@ def codex_worker(value: dict[str, Any], prompt: str) -> dict[str, Any]:
     policy = capabilities.policy(value)
     # Mark before sending: a lost response can still represent a billable request.
     persistent_tasks.check_child_launch(st.job(job_id))
+    dispatch_policy.check_job(st.job(job_id))
     st.update_job(job_id, inference_state="attempted", inference_attempted_at=time.time())
     response = rpc.call("turn/start", {"threadId": thread_id, "model": value["model"],
       "effort": value["effort"], "cwd": value["cwd"], "approvalPolicy": "never", "sandboxPolicy": policy,
@@ -425,6 +427,7 @@ def claude_worker(value: dict[str, Any], prompt: str) -> dict[str, Any]:
     input_file.write(prompt)
     input_file.seek(0)
     persistent_tasks.check_child_launch(st.job(job_id))
+    dispatch_policy.check_job(st.job(job_id))
     st.update_job(job_id, backend_starting=True, inference_state="attempted", inference_attempted_at=time.time())
     try:
       proc = subprocess.Popen(command, cwd=value["cwd"], env=env, stdin=input_file,
@@ -497,6 +500,7 @@ def main(job_id: str) -> None:
     runtime_image.require_worker(value, Path(__file__).resolve().parent)
     persistent_tasks.check_child_launch(value)
     runtime_verified = True
+    dispatch_policy.check_job(value)
     if value["cancel_requested"]:
       outcome = {"status": "cancelled"}
       return

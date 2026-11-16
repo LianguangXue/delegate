@@ -393,3 +393,18 @@ model escalation. Use program waiters and avoid repeating the worker's implement
 Model preferences are soft: inspect selection_policy/candidates for token and quota tradeoffs.
 Unknown quota is not surplus, API balance is not subscription percentage, and same-provider
 workers may share quota. Recommendations do not create a scheduler or authorize new accounts.
+
+## Policy and snapshot admission (0.26)
+
+Check the connected delegate_control status server_runtime.version/capabilities. A newer
+installed hook/CLI does not upgrade an old connection. Use current CLI and original SID
+if a launch is gated; keep result/tell/extend/cancel available for existing work.
+Hard deny_models apply to explicit choices too. Optional sol-first requires escalate=true
+or evidenced Sol quality failure before Astra, while capability floors remain in force.
+Do not reclassify risk or change work_item to bypass a policy rejection. Installing does
+not activate sol-first or change account/model grants.
+For builders, snapshot_required_files=true with explicit required_files copies declared
+dirty/untracked repository inputs into the isolated worktree. source_inputs_base=repo
+is the compatible default; choose cwd explicitly for cwd-relative additional drafts.
+The actual worker inputs are preflighted before inference. Resume retains its snapshot;
+new source inputs need a fresh task. No whole-repository copy or automatic stash/commit.

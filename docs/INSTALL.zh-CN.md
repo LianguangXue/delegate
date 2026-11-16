@@ -1,8 +1,11 @@
 # 快速安装：Claude Code、Codex、DeepSeek Harness
 
-当前实现：delegate 0.25.1；可选 am 0.4.0+。运行环境：Linux、Python 3.12+。
+当前实现：delegate 0.26.0；可选 am 0.4.0+。运行环境：Linux、Python 3.12+。
 只安装你需要的入口即可，不必装齐所有模型。Python 核心无需第三方包。
 本文不包含或要求上传任何 API Key。
+
+0.26 增加新派发门禁、可选模型硬约束和声明输入自动快照。
+见 [版本、模型与输入契约](ADMISSION.zh-CN.md)。旧 MCP 的新派发需改用当前 CLI 或重连。
 
 0.25.1 修复跨版本锁和通知索引；GC 保留锁文件及冻结运行时。
 详见 [清理范围](GC.zh-CN.md)，升级不会自动执行真实清理。

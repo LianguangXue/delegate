@@ -30,6 +30,7 @@ import completion
 import result_delivery
 import routing_policy as policy
 import persistent_tasks
+import runtime_gate
 
 TOOL_FUNCTIONS = {
   "delegate_loop": persistent_tasks.manage,
@@ -79,12 +80,13 @@ DESCRIPTIONS = {
   "delegate_quota": "Read quota/remaining balances and timestamp. Missing Claude Team data is unknown, "
     "not zero usage. API balance and subscription quota are different units. No inference.",
   "delegate_configure": "Show configuration or upsert agent/provider/limits ONLY on user request. "
+    "model_policy accepts mode(capability-first or sol-first), deny_models(exact IDs/globs), quality_escalation(bool). Provider/agent deny_models add exclusions; explicit model choices cannot bypass them. "
     "limits.worktree_timeout_seconds configures each workspace Git command (default 600, allowed 10..86400); separate from model runtime. "
     "Never store keys: providers use api_key_env OR bridge_state_dir plus bridge_account. "
     "Bridge accounts remain separate and do not change the selected main account. Changes do not enable session delegation unless the user explicitly changes defaults. "
     "Agents have provider, enabled, automatic, workspace(read-only/worktree), instructions; optional models/efforts allowlists. "
     "Provider kinds: codex, claude, anthropic (Claude CLI with provider-scoped env).",
-  "delegate_run": "Before spending inference, read the referenced brief here and declare required_files plus output_files. File-tool reviewers cannot read outside cwd or write reports. File-tool builders need relative input references in their new worktree, with source_inputs for selected drafts. Python/commands need task_profile.requires_shell=true. Prefer report text for read-only analysis; file artifacts require write operation/role. An explicit required_files list is authoritative; omitted input lists use conservative existing-absolute-path discovery, not semantic intent inference. "
+  "delegate_run": "Use source_inputs_base=repo(default) or cwd explicitly; snapshot_required_files=true copies only declared dirty/untracked repository inputs for builders. Under sol-first, Astra requires escalate=true or an evidenced successful Sol execution reviewed needs-work. Deny rules are never overridden. Before spending inference, read the referenced brief here and declare required_files plus output_files. File-tool reviewers cannot read outside cwd or write reports. File-tool builders need relative input references in their new worktree, with source_inputs for selected drafts. Python/commands need task_profile.requires_shell=true. Prefer report text for read-only analysis; file artifacts require write operation/role. An explicit required_files list is authoritative; omitted input lists use conservative existing-absolute-path discovery, not semantic intent inference. "
     "For long required work pass notify=true: return immediately, retain await_completion=true, and request completion notification. In a persistent Claude session its asyncRewake hook registers a leased waiter; Stop can pause this turn only after that waiter is verified live. Other hosts use the returned managed wait command in their background-task facility; CLI waits make no model calls and return a notice, not collected results. Single-shot/unknown hosts keep the collection guard. background=true is the separate user-authorized opt-out from required collection. Declare actual task execution needs in requirements: gpu/ssh/network booleans, allocated gpu_devices strings, ssh_targets/network_targets host+port (direct TCP probes, not logins or firewall allowlists). execution_profile auto picks sandboxed/network from role grants and never host; explicit host needs an approved worktree role. File-tool workers cannot execute these resources. Checks run under the selected sandbox before inference; unsupported needs fail without model usage. Never drop requirements or escalate profiles to work around failure. timeout_seconds=0 explicitly removes the total wall-clock limit. "
     "Start a background agent with explicit model AND effort, selection rationale, acceptance criteria, "
     "or use agent/model/effort='auto' to classify(category,complexity), plan and dispatch in ONE call. "
@@ -138,6 +140,12 @@ def tool_list() -> list[dict[str, Any]]:
     if "operation" in properties:
       properties["operation"] = {"type": "string", "enum": ["read", "write"], "default": "read",
         "description": "read = review/analyze without edits; write = edit in an isolated worktree. Not a task description."}
+    if "source_inputs_base" in properties:
+      properties["source_inputs_base"] = {"anyOf": [{"type":"null"}, {"type":"string", "enum":["repo", "cwd"]}],
+        "description":"Explicit draft path base; default repo for compatibility. Resume inherits its original base."}
+      properties["snapshot_required_files"]["description"] = "Opt-in builder snapshot of dirty/untracked declared repository inputs; external data stays read-only. Actual worktree inputs are checked before inference."
+    if "escalate" in properties:
+      properties["escalate"]["description"] = "Explicit Astra escalation authorization under sol-first; never bypasses deny_models or role/capability gates."
     if "source_inputs" in properties:
       properties["source_inputs"] = {"anyOf": [{"type": "null"}, {"type": "array", "minItems": 1,
         "maxItems": 64, "items": {"type": "string", "maxLength": 1024}}],
@@ -251,6 +259,9 @@ def hook(payload: dict[str, Any]) -> dict[str, Any]:
     return {}
   event = payload.get("hook_event_name", "SessionStart")
   if event == "PreToolUse":
+    rejection = runtime_gate.rejection(payload)
+    if rejection:
+      return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": rejection}}
     import cli_history
     try:
       cli_history.prepare_resume(payload)
@@ -258,6 +269,8 @@ def hook(payload: dict[str, Any]) -> dict[str, Any]:
       return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                      "permissionDecisionReason": "Cannot safely restore delegate history: " + str(exc)}}
     return {}
+  runtime_gate.reset(payload)
+  runtime_gate.observe(payload)
   rewritten_output = rewake.compact_echo(payload)
   rewake.observe_collection(payload)
   migration_notice = rewake.runtime_notice(payload)

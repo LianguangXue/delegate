@@ -3,6 +3,23 @@
 This publication bundles the changes since the earlier 0.12.0 snapshot. Version
 numbers below describe implementation milestones, not separately published Git tags.
 
+## delegate 0.26.0
+- Gate Claude MCP launches on a namespace-specific status observation with required
+  capabilities, minimum runtime version and live local process identity. Reset at session
+  start; existing monitoring/collection/cancellation remain available through old connections.
+- Optional global/provider/role deny_models apply to explicit and automatic choices;
+  sol-first requires explicit or evidenced quality escalation for Astra without weakening
+  capability floors. Recheck current policy immediately before backend inference.
+- Explicit repo/cwd source-input bases preserve old repo-relative semantics. Opt-in
+  snapshot_required_files overlays declared dirty/untracked repository inputs only;
+  existing same-policy actual-worktree preflight rejects missing files before inference.
+- Validation: 401 tests and independent review, including policy changes during backend
+  setup, namespace/process handshake guards and selected staged/untracked input snapshots.
+  No real-provider inference or complete host reconnect guarantee is claimed.
+- Legacy persistent controllers cannot resume new-policy/input work they cannot enforce.
+  No accounts, role permissions, default selection mode or model exclusions are changed
+  merely by installing this release. See [admission guide](ADMISSION.zh-CN.md).
+
 ## delegate 0.25.1
 - Coordinate root and locks/ lock files together so immutable older runtimes remain
   mutually exclusive with new callers. Partial acquisition is released on failure.

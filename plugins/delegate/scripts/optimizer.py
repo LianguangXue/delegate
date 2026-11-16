@@ -10,6 +10,7 @@ import budget
 import attempts as at
 import capabilities
 import routing_policy as policy
+import dispatch_policy
 import input_contract
 import persistent_tasks
 from pathlib import Path
@@ -30,7 +31,7 @@ def normalize_operation(operation: str) -> str:
 
 def role_pair(role: dict[str, Any], provider: dict[str, Any], catalog: dict[str, Any],
               model: str, effort: str, complexity: str, provider_name: str,
-              previous: dict[str, Any] | None = None) -> tuple[str, str]:
+              previous: dict[str, Any] | None = None, escalate: bool = False) -> tuple[str, str]:
   """Resolve auto within one explicitly selected role, never switch providers or grant permissions."""
   import service
   desired = {"trivial": (0, "low"), "simple": (0, "low"),
@@ -47,6 +48,8 @@ def role_pair(role: dict[str, Any], provider: dict[str, Any], catalog: dict[str,
   options = []
   for row in rows:
     name = row.get("model", row.get("id"))
+    if dispatch_policy.reason(name, role, provider, escalate, previous):
+      continue
     if model == "auto" and row.get("hidden"):
       continue
     if model != "auto" and model != name:
@@ -171,9 +174,11 @@ def plan(session_id: str, work_item: str = "main", operation: str = "read",
          estimated_main_tokens: int = 0, context_chars: int = 0, refresh: bool = False,
          complexity: str = "", category: str = "", requirements: dict[str, Any] | None = None,
          execution_profile: str = "auto", task_profile: dict[str, Any] | None = None,
-         cwd: str = "", required_files: list[str] | None = None, output_files: list[str] | None = None) -> dict[str, Any]:
+         cwd: str = "", required_files: list[str] | None = None, output_files: list[str] | None = None, escalate: bool = False) -> dict[str, Any]:
   """Recommend main or a concrete role/model/effort; no inference or dispatch occurs here."""
   import service  # Delayed to keep service's execution gates independent.
+  if type(escalate) is not bool:
+    raise ValueError("escalate must be boolean")
   needed = capabilities.normalize(requirements)
   capabilities.validate_profile(execution_profile)
   task_profile = policy.normalize(task_profile)
@@ -341,6 +346,10 @@ def plan(session_id: str, work_item: str = "main", operation: str = "read",
       options = []
       for row in rows:
         model = row.get("model", row.get("id"))
+        rejection = dispatch_policy.reason(model, role, provider, escalate, previous_jobs[-1] if previous_jobs else None, cfg)
+        if rejection:
+          errors[provider_name + ":" + model] = rejection
+          continue
         if row.get("hidden"):
           continue
         if role.get("models") is not None and model not in role["models"]:
@@ -413,7 +422,7 @@ def plan(session_id: str, work_item: str = "main", operation: str = "read",
   selected, selection_policy = policy.select(candidates, desired_tier)
   result = {**selected, "id": "p" + uuid.uuid4().hex[:16], "session_id": session_id, "task_id": task["id"],
             "cwd": cwd, "required_files": required_files, "output_files": output_files,
-            "assessment": assessment,
+            "assessment": assessment, "escalate": escalate,
             "requirements": capabilities.normalize(requirements),
             "work_item": work_item, "complexity": task["complexity"], "category": task["category"],
             "created_at": time.time(), "operation": operation,

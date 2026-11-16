@@ -54,7 +54,7 @@ def run(job_id: str, cwd: str, *args: str, timeout: float | None = None,
           last_heartbeat = time.monotonic()
     if proc.returncode:
       raise subprocess.CalledProcessError(proc.returncode, command, output, error)
-    return output.strip()
+    return output if "\0" in output else output.strip()
   finally:
     stop_owned(proc, record)
     proc.stdout.close()
@@ -152,8 +152,29 @@ def prepare(value: dict[str, Any]) -> str:
   job_id = value["id"]
   source = value["source_cwd"]
   top = Path(run(job_id, source, "rev-parse", "--show-toplevel")).resolve()
-  inputs = source_inputs.validate(value.get("source_inputs") or None)
-  if not inputs and run(job_id, str(top), "status", "--porcelain", "--untracked-files=normal"):
+  inputs = source_inputs.repository_paths(top, Path(source).resolve(), value.get("source_inputs") or [],
+    value.get("source_inputs_base", "repo"))
+  automatic = value.get("snapshot_required_files", False)
+  if automatic:
+    selected = []
+    required = []
+    for name in value.get("required_files", []):
+      path = Path(os.path.abspath(Path(source) / name))
+      try:
+        relative = path.relative_to(top).as_posix()
+      except ValueError:
+        required.append(name)  # External read-only data is preflighted, never copied.
+        continue
+      selected.extend(source_inputs.validate([relative]))
+      required.append(os.path.relpath(path, source))
+    if selected:
+      changed = run(job_id, str(top), "--literal-pathspecs", "diff", "--name-only", "-z", "HEAD", "--", *selected)
+      untracked = run(job_id, str(top), "--literal-pathspecs", "ls-files", "--others", "--exclude-standard", "-z", "--", *selected)
+      dirty = set(changed.split("\0")) | set(untracked.split("\0"))
+      inputs = source_inputs.validate(list(dict.fromkeys([*inputs, *(p for p in selected if p in dirty)])) or None)
+    st.update_job(job_id, required_files=required)
+  snapshot_value = {**value, "source_inputs": inputs}
+  if not inputs and not automatic and run(job_id, str(top), "status", "--porcelain", "--untracked-files=normal"):
     raise ValueError("Write delegation requires a clean source repository. Preserve current changes first; "
                      "or select exact source_inputs file paths to snapshot current drafts into an isolated worktree.")
   if "160000 " in run(job_id, str(top), "ls-files", "--stage"):
@@ -179,7 +200,7 @@ def prepare(value: dict[str, Any]) -> str:
       if ignored:
         raise ValueError("source_inputs cannot include ignored files; select reviewed source/document files")
     raw = run(job_id, str(top), "--literal-pathspecs", "ls-tree", "-r", "--name-only", "-z", base, "--", *inputs)
-    snapshot = source_inputs.capture(value, top, base, set(raw.split("\0")))
+    snapshot = source_inputs.capture(snapshot_value, top, base, set(raw.split("\0")))
     if run(job_id, str(top), "rev-parse", "HEAD") != base:
       raise ValueError("Source HEAD changed during snapshot capture; retry after the edit finishes")
   cwd = target / Path(source).resolve().relative_to(top)

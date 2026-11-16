@@ -90,7 +90,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "mcp__.*delegate_run",
+        "matcher": "mcp__.*delegate_(run|loop)",
         "hooks": [
           {
             "type": "command",

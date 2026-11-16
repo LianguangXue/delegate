@@ -13,6 +13,7 @@ import hosts
 import persistent_tasks
 import result_delivery
 import runtime_image
+import runtime_gate
 import storage as st
 
 HELP = '''Current CLI fallback for old MCP connections. Keep the ORIGINAL session_id.
@@ -183,7 +184,7 @@ def main(argv: list[str], dispatch: Callable[[str, dict[str, Any]], Any],
         hosts.check({"session_id": args.session_id})
       result = {"cli_version": runtime_image.VERSION, "scripts": str(Path(__file__).resolve().parent),
         "connected_mcp_version": "unknown: check the CONNECTED MCP delegate_control status server_runtime.version",
-        "capabilities": ["source_inputs", "required_files", "task_profile", "paged_results", "compact_verify", "full_report_export", "persistent_tasks"],
+        "capabilities": ["source_inputs", "required_files", "task_profile", "paged_results", "compact_verify", "full_report_export", "persistent_tasks", "source_inputs_base", *runtime_gate.CAPABILITIES],
         "input_format": {"name": "delegate_job", "arguments": {"session_id": args.session_id or "SID", "action": "result", "job_id": "JOB"}},
         "help": "delegate-agent call --help; delegate-agent result --help; delegate-agent schema delegate_run",
         "documentation": guide_path()}

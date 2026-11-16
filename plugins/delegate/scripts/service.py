@@ -29,6 +29,8 @@ import attempts as at
 import math
 import capabilities
 import source_inputs as drafts
+import dispatch_policy
+import runtime_gate
 import result_delivery
 import completion
 import routing_policy as policy
@@ -159,7 +161,7 @@ def control(session_id: str, action: str = "status", agents: list[str] | None = 
       st.save_session(session_id, state)
   return {"session_id": session_id, **state, "configured_agents": cfg["agents"],
           "server_runtime": {"scripts": str(Path(__file__).resolve().parent),
-            "version": runtime_image.VERSION,
+            "version": runtime_image.VERSION, "capabilities": runtime_gate.CAPABILITIES, "identity": identity(os.getpid()),
             "frozen": (Path(__file__).resolve().parent / "runtime-image.json").is_file(),
             "legacy_session_fallback": "delegate-agent call with JSON name/arguments and the same session_id"},
           "worktree_timeout_seconds": cfg.get("worktree_timeout_seconds", 600),
@@ -167,7 +169,7 @@ def control(session_id: str, action: str = "status", agents: list[str] | None = 
           "execution_profiles": {"default": "sandboxed", "available": sorted(capabilities.PROFILES),
             "authorization": "Per-role execution_profiles; host requires explicit selection and a worktree role. No automatic escalation."},
           "model_policy": {"preferences": policy.PREFERENCES, "max_auto_effort": policy.MAX_AUTO_EFFORT,
-            "selection": policy.SELECTION_POLICY,
+            "selection": policy.SELECTION_POLICY, "enforcement": cfg.get("model_policy", {}),
             "assessment": "Parent reasons once using task_profile; no classifier model call. Explicit model/effort remain authoritative."},
           "persistent_tasks": state.get("loops", []),
           "routing": ({"mode":"host-aware planning", "parent_provider":state.get("parent_provider") or "unknown"}
@@ -194,6 +196,7 @@ def validate_config(cfg: dict[str, Any]) -> None:
   low, critical = routing["claude_low_remaining_percent"], routing["claude_critical_remaining_percent"]
   if not budget.valid_percent(low) or not budget.valid_percent(critical) or not critical <= low:
     raise ValueError("Invalid Claude routing thresholds")
+  dispatch_policy.validate(cfg.get("model_policy", {}))
   model_tiers = cfg.get("model_tiers", {})
   if (not isinstance(model_tiers, dict)
       or any(not isinstance(k, str) or not k.strip() or type(v) is not int or v not in {0, 1, 2}
@@ -203,9 +206,10 @@ def validate_config(cfg: dict[str, Any]) -> None:
   for name, provider in cfg["providers"].items():
     st.key(name)
     allowed = {"kind", "enabled", "command", "models", "efforts", "base_url", "api_key_env", "balance_url",
-               "models_url", "bridge_account", "bridge_state_dir", "is_default"}
+               "models_url", "bridge_account", "bridge_state_dir", "is_default", "deny_models"}
     if set(provider) - allowed:
       raise ValueError("Unknown provider fields; secrets must use api_key_env")
+    dispatch_policy.validate({"deny_models": provider.get("deny_models", [])})
     if "is_default" in provider and type(provider["is_default"]) is not bool:
       raise ValueError("Provider is_default must be a boolean")
     if provider.get("enabled") and provider.get("is_default"):
@@ -248,7 +252,8 @@ def validate_config(cfg: dict[str, Any]) -> None:
     raise ValueError("At most one enabled provider can set is_default")
   for name, agent in cfg["agents"].items():
     st.key(name)
-    if set(agent) - {"provider", "enabled", "automatic", "workspace", "instructions", "models", "efforts", "execution_profiles", "gpu_devices"}:
+    dispatch_policy.validate({"deny_models": agent.get("deny_models", [])})
+    if set(agent) - {"provider", "enabled", "automatic", "workspace", "instructions", "models", "efforts", "execution_profiles", "gpu_devices", "deny_models"}:
       raise ValueError("Unknown agent field")
     if agent.get("provider") not in cfg["providers"]:
       raise ValueError("Unknown agent provider")
@@ -294,10 +299,12 @@ def configure(section: str = "show", name: str = "", value: dict[str, Any] | Non
       cfg.update(value)
     elif section == "routing" and isinstance(value, dict):
       cfg["routing"] = {**cfg.get("routing", {}), **value}
+    elif section == "model_policy" and isinstance(value, dict):
+      cfg["model_policy"] = {**cfg.get("model_policy", {}), **value}
     elif section == "model_tiers" and isinstance(value, dict):
       cfg["model_tiers"] = {**cfg.get("model_tiers", {}), **value}
     else:
-      raise ValueError("section must be show/agents/providers/limits/routing/defaults/model_tiers")
+      raise ValueError("section must be show/agents/providers/limits/routing/defaults/model_tiers/model_policy")
     validate_config(cfg)
     st.write("config.json", cfg)
   return cfg
@@ -390,7 +397,8 @@ def run(session_id: str, agent: str, model: str, effort: str, task: str, accepta
         background: bool = False, requirements: dict[str, Any] | None = None,
         execution_profile: str = "auto", source_inputs: list[str] | None = None,
         notify: bool = False, task_profile: dict[str, Any] | None = None,
-        required_files: list[str] | None = None, output_files: list[str] | None = None) -> dict[str, Any]:
+        required_files: list[str] | None = None, output_files: list[str] | None = None, escalate: bool = False,
+        source_inputs_base: str | None = None, snapshot_required_files: bool | None = None) -> dict[str, Any]:
   """Dispatch under the resume guard, then wait without blocking worker archival."""
   if type(wait_seconds) is not int or not 0 <= wait_seconds <= 50:
     raise ValueError("wait_seconds must be 0..50")
@@ -422,11 +430,16 @@ def _dispatch(session_id: str, agent: str, model: str, effort: str, task: str, a
         requirements: dict[str, Any] | None = None, execution_profile: str = "auto",
         source_inputs: list[str] | None = None, notify: bool = False,
         task_profile: dict[str, Any] | None = None, required_files: list[str] | None = None,
-        output_files: list[str] | None = None) -> dict[str, Any]:
+        output_files: list[str] | None = None, escalate: bool = False,
+        source_inputs_base: str | None = None, snapshot_required_files: bool | None = None) -> dict[str, Any]:
   """Validate authorization and selection, then start a detached bounded worker."""
   st.key(session_id)
   launch = persistent_tasks.context(session_id)
   operation = optimizer.normalize_operation(operation)
+  if type(escalate) is not bool or (snapshot_required_files is not None and type(snapshot_required_files) is not bool):
+    raise ValueError("escalate and snapshot_required_files must be booleans")
+  if source_inputs_base not in {None, "repo", "cwd"}:
+    raise ValueError("source_inputs_base must be repo or cwd")
   input_paths = drafts.validate(source_inputs)
   profile_supplied = task_profile is not None
   task_profile = policy.normalize(task_profile)
@@ -461,6 +474,15 @@ def _dispatch(session_id: str, agent: str, model: str, effort: str, task: str, a
     if source_inputs is not None and input_paths != old_inputs:
       raise ValueError("Resume preserves its existing source_inputs snapshot; use a fresh task to select new inputs")
     input_paths = old_inputs
+  if previous:
+    if source_inputs_base is not None and source_inputs_base != previous.get("source_inputs_base", "repo"):
+      raise ValueError("Resume cannot change source_inputs_base")
+    if snapshot_required_files is not None and snapshot_required_files != previous.get("snapshot_required_files", False):
+      raise ValueError("Resume cannot replace its input snapshot")
+  source_inputs_base = source_inputs_base or (previous or {}).get("source_inputs_base", "repo")
+  snapshot_required_files = snapshot_required_files if snapshot_required_files is not None else (previous or {}).get("snapshot_required_files", False)
+  if snapshot_required_files and not required_files:
+    raise ValueError("snapshot_required_files requires nonempty required_files")
   requirements_declared = requirements is not None
   if previous:
     prior_execution = capabilities.from_job(previous)
@@ -473,7 +495,7 @@ def _dispatch(session_id: str, agent: str, model: str, effort: str, task: str, a
   if complexity and complexity not in {"trivial", "simple", "standard", "complex"}:
     raise ValueError("Invalid complexity")
   if agent == "auto":
-    if input_paths and operation != "write":
+    if (input_paths or snapshot_required_files) and operation != "write":
       raise ValueError("source_inputs requires operation='write' for automatic builder selection")
     if model != "auto" or effort != "auto" or plan_id:
       raise ValueError("Automatic selection uses agent/model/effort=auto without a preselected plan")
@@ -492,7 +514,7 @@ def _dispatch(session_id: str, agent: str, model: str, effort: str, task: str, a
     decision = optimizer.plan(session_id, work_item, operation, estimated_main_tokens, len(context),
                               complexity=complexity, category=category, requirements=requirements,
                               execution_profile=execution_profile, task_profile=task_profile, cwd=str(workdir),
-                              required_files=required_files, output_files=output_files)
+                              required_files=required_files, output_files=output_files, escalate=escalate)
     if decision["action"] != "delegate":
       return decision
     agent, model, effort, plan_id = decision["agent"], decision["model"], decision["effort"], decision["id"]
@@ -502,7 +524,7 @@ def _dispatch(session_id: str, agent: str, model: str, effort: str, task: str, a
     names = [name for name, row in cfg["agents"].items() if row["enabled"]]
     raise ValueError("Agent is missing or disabled; enabled agent names: " + ", ".join(names) +
                      ". Use delegate_catalog(provider_name=...) for roles/models/efforts")
-  if input_paths and role["workspace"] != "worktree":
+  if (input_paths or snapshot_required_files) and role["workspace"] != "worktree":
     raise ValueError("source_inputs is for isolated worktree builders; read-only reviewers already see current source files")
   commits.validate(allow_commit, commit_message, commit_paths, role["workspace"])
   provider_name = role["provider"]
@@ -576,10 +598,13 @@ def _dispatch(session_id: str, agent: str, model: str, effort: str, task: str, a
   if model == "auto" or effort == "auto":
     requested = {"model": model, "effort": effort}
     model, effort = optimizer.role_pair(role, provider, catalog(provider_name), model, effort,
-                                        complexity, provider_name, last_attempt)
+                                        complexity, provider_name, last_attempt, escalate=escalate)
     selection = {"requested": requested, "model": model, "effort": effort, "complexity": complexity,
                  "model_family": policy.family(model), "assessment": assessment,
                  "scope": "Selected role/provider only; capability tiers are heuristics"}
+  rejection = dispatch_policy.reason(model, role, provider, escalate, last_attempt, cfg)
+  if rejection:
+    raise ValueError(rejection)
   choose(role, provider, provider_name, model, effort)
   quota_snapshot = quota(provider_name, session_id=session_id)
   if quota_snapshot.get("status") == "limited" and quota_snapshot.get("model") == model:
@@ -638,6 +663,8 @@ def _dispatch(session_id: str, agent: str, model: str, effort: str, task: str, a
            "selection": selection,
            "task_profile": task_profile, "task_assessment": assessment,
            "completion_mode": "notify" if notify else "wait",
+           "escalate": escalate, "quality_escalation_from": last_attempt["id"] if last_attempt else None,
+           "source_inputs_base": source_inputs_base, "snapshot_required_files": snapshot_required_files,
            "source_inputs": input_paths, "source_snapshot": previous.get("source_snapshot") if previous else None,
            "source_cwd": str(workdir), "cwd": previous["cwd"] if previous else str(workdir),
            "timeout_seconds": timeout_seconds, "runtime_control_version": 1, "runtime_revision": 0,
