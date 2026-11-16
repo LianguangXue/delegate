@@ -2,7 +2,11 @@
 
 A shared delegation engine for Claude Code, Codex and DeepSeek Harness, with
 per-task model/effort, durable results and configured Claude/Codex/API workers.
-Version 0.26.0. Activation is configurable; new installations default off.
+Version 0.26.1. Activation is configurable; new installations default off.
+
+Old conversations can use the stable `delegate-agent` CLI without restarting: each
+invocation follows the currently installed user plugin while existing workers keep their
+frozen runtime. See [old-session bridge](docs/SESSION-BRIDGE.zh-CN.md).
 
 New launch admission checks catch old MCP connections before dispatch. Optional hard
 model exclusions and Astra escalation authorization apply before inference; builders can

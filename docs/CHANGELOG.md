@@ -3,6 +3,18 @@
 This publication bundles the changes since the earlier 0.12.0 snapshot. Version
 numbers below describe implementation milestones, not separately published Git tags.
 
+## delegate 0.26.1
+- A stable delegate-agent resolver follows the installed user-scoped plugin on every
+  CLI invocation. Old conversations keep their SID/jobs and access new arguments via
+  the CLI without restarting. Running workers/waits and already-connected MCP engines
+  remain pinned; the resolver is not an MCP hot-replacement mechanism.
+- Native-only installations retain an explicit frozen fallback. Broken, ambiguous or
+  incompatible installed metadata fails closed rather than silently running older code.
+- Resolver and launcher updates are atomic; see [old-session bridge](SESSION-BRIDGE.zh-CN.md).
+- Validation: 407 tests plus independent review. Activation-switch fixtures preserve
+  stdin/session arguments and in-flight engines; an existing old job was queried through
+  the installed new CLI with unchanged job bytes. No worker replay or provider inference.
+
 ## delegate 0.26.0
 - Gate Claude MCP launches on a namespace-specific status observation with required
   capabilities, minimum runtime version and live local process identity. Reset at session

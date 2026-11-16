@@ -149,7 +149,7 @@ def tool_list() -> list[dict[str, Any]]:
     if "source_inputs" in properties:
       properties["source_inputs"] = {"anyOf": [{"type": "null"}, {"type": "array", "minItems": 1,
         "maxItems": 64, "items": {"type": "string", "maxLength": 1024}}],
-        "description": "Optional exact repository-root-relative draft files for a builder snapshot; 1 MiB/file, 8 MiB total. No directory copying."}
+        "description": "Optional exact draft paths relative to source_inputs_base (repo by default); 1 MiB/file, 8 MiB total. No directory copying."}
     if "notify" in properties:
       properties["notify"] = {"type": "boolean", "default": False,
         "description": "Return immediately and notify on completion while keeping the result required; differs from background=true."}

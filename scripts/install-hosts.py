@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 import tomllib
+import tempfile
 import re
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'plugins/delegate/scripts'))
@@ -138,13 +139,33 @@ def main() -> None:
   image = runtime_image.freeze(repo / 'plugins/delegate/scripts')
   entry = Path(image['path']) / 'delegate.py'
   binary.parent.mkdir(parents=True, exist_ok=True)
-  text = '#!/bin/sh\n# managed by delegate host installer\nexec ' + shlex.quote(sys.executable) + ' -B ' + shlex.quote(str(entry)) + ' cli "$@"\n'
+  resolver = home / '.local/lib/delegate/runtime_entry.py'
+  resolver.parent.mkdir(parents=True, exist_ok=True)
+  if resolver.is_symlink() or (resolver.exists() and '# managed by delegate runtime resolver' not in resolver.read_text()):
+    raise ValueError('Refusing to replace an unmanaged runtime resolver')
+  resolver_text = (repo / 'plugins/delegate/scripts/runtime_entry.py').read_text()
+  fd, temporary = tempfile.mkstemp(prefix='.runtime-entry-', dir=resolver.parent)
+  try:
+    with os.fdopen(fd, 'w') as stream:
+      stream.write(resolver_text); stream.flush(); os.fsync(stream.fileno())
+    os.chmod(temporary, 0o700)
+    os.replace(temporary, resolver)
+  finally:
+    if os.path.exists(temporary): os.unlink(temporary)
+  text = '#!/bin/sh\n# managed by delegate host installer\nexec ' + shlex.quote(sys.executable) + ' -B ' + shlex.quote(str(resolver)) + ' --fallback ' + shlex.quote(str(entry)) + ' "$@"\n'
   if binary.exists() and binary.read_text()!=text:
     if '# managed by delegate host installer' not in binary.read_text():raise ValueError('Launcher already exists')
     backup(binary)
-  binary.write_text(text);os.chmod(binary,0o700)
+  fd, temporary = tempfile.mkstemp(prefix='.delegate-launcher-', dir=binary.parent)
+  try:
+    with os.fdopen(fd, 'w') as stream:
+      stream.write(text); stream.flush(); os.fsync(stream.fileno())
+    os.chmod(temporary, 0o700)
+    os.replace(temporary, binary)
+  finally:
+    if os.path.exists(temporary): os.unlink(temporary)
   if args.refresh_launcher:
-    print('Updated managed launcher to frozen runtime '+image['digest']+'. Existing MCP servers require restart; host settings preserved.')
+    print('Updated stable CLI resolver; each invocation follows the installed user plugin. Native fallback '+image['digest']+'. Already-connected MCP processes keep their engine; old conversations can use this CLI without restart.')
     return
   state=Path(os.environ.get('DELEGATE_STATE_DIR',str(home/'.claude/delegate'))).resolve()
   if args.host in {'codex','all'}:

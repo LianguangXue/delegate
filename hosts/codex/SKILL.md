@@ -123,3 +123,10 @@ dirty/untracked repository inputs into the isolated worktree. source_inputs_base
 is the compatible default; choose cwd explicitly for cwd-relative additional drafts.
 The actual worker inputs are preflighted before inference. Resume retains its snapshot;
 new source inputs need a fresh task. No whole-repository copy or automatic stash/commit.
+
+The managed delegate-agent CLI resolves the installed user plugin on each invocation.
+For an old conversation with a stale MCP, use this CLI consistently with the SAME SID
+for run/status/result/verify/tell/extend; no conversation restart or job replay is needed.
+Check --version/doctor and use schema only when new argument details are needed. Native
+Codex/DSH calls retain call codex/call dsh (or --host on convenience commands). Existing
+MCP processes retain their loaded engine; CLI routing does not rewrite cached MCP schemas.
