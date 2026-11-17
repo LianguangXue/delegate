@@ -3,6 +3,21 @@
 This publication bundles the changes since the earlier 0.12.0 snapshot. Version
 numbers below describe implementation milestones, not separately published Git tags.
 
+## delegate 0.26.2
+- Omitted run work_item derives a stable intent/input-contract key. Equivalent legacy
+  main jobs retain dedup/retry/reuse checks without mixing unrelated historical jobs.
+  Explicit IDs, bound plans and resume IDs remain authoritative; no fabricated checkpoints.
+- Native execution completion is separate from transcript metering. Stop-observed agents
+  with missing usage no longer block finish. Report exposes native IDs/coverage/recovery;
+  resolve-native requires terminal evidence and never invents usage.
+- With incomplete native accounting, finish closes directly after required results are
+  collected, so older Stop hooks cannot leave the task permanently closing. Parent scan
+  boundary is frozen; excluded final-response usage remains explicit/incomplete.
+- See [task identity and completion](TASK-LIFECYCLE.zh-CN.md).
+- Validation: 420 tests and independent review; installed CLI fixtures confirm unrelated
+  new work reaches planning, same accepted work stays guarded, and stopped/unmetered native
+  work can close without claiming complete usage. No real worker replay or inferred checkpoint.
+
 ## delegate 0.26.1
 - A stable delegate-agent resolver follows the installed user-scoped plugin on every
   CLI invocation. Old conversations keep their SID/jobs and access new arguments via

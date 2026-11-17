@@ -167,6 +167,25 @@ def scan(task: dict[str, Any], path: str, source: str, offset: int = 0,
   return offset, complete
 
 
+def native_stopped(child: dict[str, Any]) -> bool:
+  """Separate observed execution completion from usage-file completeness, including legacy Stop records."""
+  if child.get("execution_state") is not None:
+    return child["execution_state"] == "stopped"
+  # Prior versions only wrote path on SubagentStop (including path=None).
+  return "path" in child or child.get("complete") is True
+
+
+def native_details(task: dict[str, Any]) -> list[dict[str, Any]]:
+  """Expose blockers and honest measurement coverage without copying native transcripts."""
+  return [{"agent_id": aid, "execution_state": "stopped" if native_stopped(child) else "unconfirmed",
+    "completion_source": child.get("completion_source") or ("legacy-stop-record" if native_stopped(child) else "awaiting-stop"),
+    "usage_status": "complete" if child.get("complete") and child.get("observed") else "partial" if child.get("observed") else "unknown",
+    "transcript_path": child.get("path"), "usage_complete": bool(child.get("complete") and child.get("observed")),
+    "recovery": "Execution ended; missing usage stays unknown and does not block finish" if native_stopped(child) else
+      "Confirm the native agent finished using host evidence, then call delegate_task resolve-native with this agent_id as native_agent_id and evidence"}
+    for aid, child in task["native"].items()]
+
+
 def collect(task: dict[str, Any]) -> None:
   """Update an open task from known transcript paths only."""
   if task.get("transcript_path") and (task["status"] != "closed" or not task.get("parent_complete")):
@@ -207,9 +226,11 @@ def hook(payload: dict[str, Any]) -> None:
       task["offset"] = st.read("meter-" + sid + ".json", {}).get("turn_start", 0)
       task["issues"] = [i for i in task["issues"] if i != "parent transcript unavailable"]
     if event == "SubagentStart" and payload.get("agent_id"):
-      task["native"].setdefault(payload["agent_id"], {"complete": False})
+      task["native"].setdefault(payload["agent_id"], {}).update(
+        execution_state="running", complete=False, started_at=time.time(), completion_source="SubagentStart")
     if event == "SubagentStop" and payload.get("agent_id"):
-      task["native"].setdefault(payload["agent_id"], {}).update(path=payload.get("agent_transcript_path"))
+      task["native"].setdefault(payload["agent_id"], {}).update(path=payload.get("agent_transcript_path"),
+        execution_state="stopped", stopped_at=time.time(), completion_source="SubagentStop")
     collect(task)
     if event == "StopFailure":
       task["issues"].append("parent API failure; unreported partial usage may be missing")
@@ -217,7 +238,7 @@ def hook(payload: dict[str, Any]) -> None:
       live = (any(st.job(j).get("await_completion", True)
                   and (not st.job(j).get("collected_at") or st.job(j)["status"] in ACTIVE - {"orphaned"})
                   for j in task["jobs"])
-              or any(not child.get("complete") for child in task["native"].values()))
+              or any(not native_stopped(child) for child in task["native"].values()))
       if not live:
         if task.get("transcript_path"):
           try:
@@ -270,6 +291,8 @@ def report(task: dict[str, Any]) -> dict[str, Any]:
     issues.append("parent transcript not completely metered")
   if task.get("unmetered_messages"):
     issues.append("assistant messages with missing usage")
+  if any(not native_stopped(child) for child in task["native"].values()):
+    issues.append("native execution completion unconfirmed")
   if any(not child.get("complete") for child in task["native"].values()):
     issues.append("native subagent usage incomplete")
   if any(not child.get("observed") for child in task["native"].values()):
@@ -289,12 +312,13 @@ def report(task: dict[str, Any]) -> dict[str, Any]:
     "total_scope": "persistent worker usage; parent coordination separately reported" if task.get("detached_controller") else
       "observed parent/direct-worker usage; persistent_task_ids separately reported" if task.get("persistent_task_ids") else
       "observed worker usage; native parent excluded" if native_parent else "observed parent and worker usage",
-    "by_provider_model": by_model,
+    "by_provider_model": by_model, "native_agents": native_details(task),
     "persistent_task_ids": task.get("persistent_task_ids", []),
     "total": totals([r for rows in groups.values() for r in rows]), "jobs": children,
     "elapsed_seconds": round(task.get("finished_at", time.time()) - task["created_at"], 3),
     "measurement_complete": not issues and task["status"] == "closed", "issues": sorted(set(issues)),
     "final_response_pending": task["status"] != "closed",
+    "parent_final_response_metered": not task.get("final_response_unmetered", False) and task["status"] == "closed" and task.get("parent_complete", False),
     "units": "observed tokens; cache subsets separate; not billed dollars or equivalent quota credits",
     "record_path": str(st.root() / ("task-" + task["id"] + ".json"))}
 
@@ -329,7 +353,7 @@ def task_tool(session_id: str, action: str = "report", task_id: str = "", label:
               category: str | None = None, complexity: str | None = None, case_key: str | None = None,
               arm: str | None = None, token_budget: int = 0, max_attempts: int = 3,
               verdict: str = "", evidence: str = "", accepted_jobs: list[str] | None = None,
-              reference_task_id: str = "") -> Any:
+              reference_task_id: str = "", native_agent_id: str = "") -> Any:
   """Begin/update/finish/report tasks, or compare accepted complete matched cases."""
   if action == "begin":
     return report(begin(session_id, label if label is not None else "Current user task",
@@ -366,8 +390,24 @@ def task_tool(session_id: str, action: str = "report", task_id: str = "", label:
         raise ValueError("Finish requires a verdict and actual validation evidence")
       if any(st.job(j)["status"] in ACTIVE for j in task["jobs"]):
         raise ValueError("Collect all task jobs before finishing")
-      if any(not child.get("complete") for child in task["native"].values()):
-        raise ValueError("Native subagent accounting is still pending; collect/report before finishing")
+      pending = [aid for aid, child in task["native"].items() if not native_stopped(child)]
+      if pending:
+        raise ValueError("Native execution completion unconfirmed: " + ", ".join(pending) +
+          ". Use delegate_task report for details; after confirming terminal host evidence use resolve-native with native_agent_id and evidence. Missing usage alone does not block finish.")
+      incomplete_native = any(not child.get("complete") or not child.get("observed") for child in task["native"].values())
+      if incomplete_native:
+        missing = [jid for jid in task["jobs"] if st.job(jid).get("await_completion", True)
+          and not st.job(jid).get("collected_at")]
+        if missing:
+          raise ValueError("Required task results remain uncollected: " + ", ".join(missing) +
+            ". Collect complete result pages or export the full report before finishing; acceptance is not collection.")
+    elif action == "resolve-native":
+      if native_agent_id not in task["native"] or not evidence.strip():
+        raise ValueError("resolve-native requires an existing native_agent_id and concrete terminal execution evidence")
+      if accepted_jobs is not None:
+        raise ValueError("resolve-native does not accept plugin jobs")
+      task["native"][native_agent_id].update(execution_state="stopped", completion_resolved_at=time.time(),
+        completion_source="parent-confirmed", execution_evidence=evidence[:4000])
     elif action != "report":
       raise ValueError("Unknown task action")
     if accepted_jobs is not None:
@@ -396,9 +436,26 @@ def task_tool(session_id: str, action: str = "report", task_id: str = "", label:
     elif action == "finish":
       task.update(verdict=verdict, evidence=evidence[:4000])
       if task["status"] != "closed":
-        if state.get("host_kind") in {"codex", "dsh"}:
+        if state.get("host_kind") in {"codex", "dsh"} or incomplete_native:
           task.update(status="closed", finished_at=time.time())
-          task["issues"].append("Native parent usage/final response not metered by this adapter")
+          if incomplete_native and state.get("host_kind", "claude") == "claude":
+            # Old loaded hooks still gate on complete. Close here without falsifying usage,
+            # and freeze the parent boundary so later turns cannot be attributed to this task.
+            task["final_response_unmetered"] = True
+            task["issues"].append("Closed with incomplete native usage; parent final response not metered")
+            if task.get("transcript_path"):
+              try:
+                boundary = Path(task["transcript_path"]).stat().st_size
+                task["end_offset"] = boundary
+                meter = st.read("meter-" + st.key(session_id) + ".json", {})
+                if state.get("active_task") == task["id"] and meter.get("path") == task["transcript_path"]:
+                  meter.update(turn_start=boundary, offset=boundary)
+                  st.write("meter-" + st.key(session_id) + ".json", meter)
+              except OSError:
+                task["issues"].append("Parent close boundary unavailable")
+                task["end_offset"] = task.get("offset", 0)
+          else:
+            task["issues"].append("Native parent usage/final response not metered by this adapter")
           if state.get("active_task") == task["id"]:
             state.pop("active_task", None)
             st.save_session(session_id, state)

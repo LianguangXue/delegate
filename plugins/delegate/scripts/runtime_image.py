@@ -12,7 +12,7 @@ import stat
 
 import storage as st
 
-VERSION = "0.26.1"
+VERSION = "0.26.2"
 _VERSIONS: dict[str, str] = {}
 
 

@@ -48,9 +48,10 @@ def check_job(job: dict[str, Any]) -> None:
       previous = st.job(prior_id)
     except ValueError:
       pass  # Missing prior evidence cannot authorize escalation.
-  if previous and (previous.get('session_id') != job.get('session_id')
-      or previous.get('work_item', 'main') != job.get('work_item', 'main')):
-    previous = None
+  if previous:
+    from optimizer import matches_work_item
+    if previous.get('session_id') != job.get('session_id') or not matches_work_item(previous, job.get('work_item', 'main')):
+      previous = None
   rejection = reason(job.get('model', ''), cfg['agents'].get(job.get('agent', ''), job.get('role', {})),
     cfg['providers'].get(job.get('provider_name', ''), job.get('provider', {})), job.get('escalate', False), previous, cfg)
   if rejection:

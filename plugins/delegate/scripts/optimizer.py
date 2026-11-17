@@ -1,6 +1,8 @@
 """Measured task routing with conservative bootstrap estimates and explicit quota tradeoffs."""
 from typing import Any
 import statistics
+import hashlib
+import json
 import time
 import uuid
 
@@ -145,15 +147,42 @@ def observations(task: dict[str, Any], agent: str, model: str, effort: str,
           "mean_parent_share": statistics.mean(overheads) if overheads else None}
 
 
+def default_work_item(task: str, acceptance: str, context: str, cwd: str, operation: str,
+                      required_files: list[str] | None = None, output_files: list[str] | None = None,
+                      source_inputs: list[str] | None = None, source_inputs_base: str = "repo",
+                      snapshot_required_files: bool = False) -> str:
+  """Identify an omitted work item from its intent and declared inputs, never its chosen model."""
+  contract = [sorted(set(required_files or [])), sorted(set(output_files or [])), sorted(set(source_inputs or [])),
+    source_inputs_base, snapshot_required_files]
+  intent = [task.strip(), acceptance.strip(), context.strip(), str(Path(cwd).resolve()), operation, contract]
+  return "auto-" + hashlib.sha256(json.dumps(intent, ensure_ascii=False).encode()).hexdigest()[:24]
+
+
+def matches_work_item(job: dict[str, Any], work_item: str) -> bool:
+  """Match exact keys plus equivalent legacy main jobs without mixing unrelated historical intents."""
+  if job.get("work_item", "main") == work_item:
+    return True
+  if (job.get("work_item", "main") != "main" or not isinstance(work_item, str)
+      or not work_item.startswith("auto-") or not isinstance(job.get("task"), str)):
+    return False
+  return default_work_item(job["task"], str(job.get("acceptance", "")), str(job.get("context", "")),
+    job.get("source_cwd") or job.get("cwd") or ".",
+    "write" if job.get("role", {}).get("workspace") == "worktree" else "read",
+    job.get("required_files"), job.get("output_files"), job.get("source_inputs"),
+    job.get("source_inputs_base", "repo"), job.get("snapshot_required_files", False)) == work_item
+
+
 def work_state(task: dict[str, Any], work_item: str) -> dict[str, Any] | None:
   """Avoid duplicate work and bound repair loops for one logical work item."""
-  jobs = [st.job(j) for j in task["jobs"] if st.job(j).get("work_item", "main") == work_item]
+  jobs = [st.job(j) for j in task["jobs"] if matches_work_item(st.job(j), work_item)]
   running = [j["id"] for j in jobs if j["status"] in ACTIVE]
   if running:
     return {"action": "wait", "job_ids": running, "reason": "This work item already has running work"}
   accepted = [j for j in jobs if j.get("review") == "accepted"]
   if accepted and not accepted[-1].get("evidence_checkpoint"):
-    return {"action": "replan", "reason": "Accepted result lacks an evidence checkpoint; revalidate before reuse"}
+    return {"action": "replan", "job_id": accepted[-1]["id"], "work_item": work_item,
+      "reason": "Accepted result lacks an evidence checkpoint; revalidate before reuse",
+      "recovery": "For this same work, inspect current evidence, call delegate_inspect checkpoint with explicit files, then verify again. For different work omit work_item on delegate_run or choose a distinct stable ID. Acceptance text is not a file fingerprint."}
   if accepted and accepted[-1].get("evidence_checkpoint"):
     import inspection
     try:
@@ -222,7 +251,7 @@ def plan(session_id: str, work_item: str = "main", operation: str = "read",
     ac.save(task)
     reuse = work_state(task, work_item)
     measurement = ac.report(task)
-    work_jobs = [st.job(j) for j in task["jobs"] if st.job(j).get("work_item", "main") == work_item]
+    work_jobs = [st.job(j) for j in task["jobs"] if matches_work_item(st.job(j), work_item)]
     previous_jobs = [j for j in work_jobs if at.model_attempted(j)]
   prior = work_jobs[-1] if work_jobs else {}
   if task_profile is None:

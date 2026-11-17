@@ -510,7 +510,9 @@ def _dispatch(session_id: str, agent: str, model: str, effort: str, task: str, a
       if not root_task["jobs"]:
         root_task["label"] = task.splitlines()[0][:120] if task.strip() else root_task["label"]
         accounting.save(root_task)
-    work_item = work_item or (st.job(resume_job).get("work_item", "main") if resume_job else "main")
+    work_item = work_item or (previous.get("work_item", "main") if previous else
+      optimizer.default_work_item(task, acceptance, context, str(workdir), operation,
+        required_files, output_files, input_paths, source_inputs_base, snapshot_required_files))
     decision = optimizer.plan(session_id, work_item, operation, estimated_main_tokens, len(context),
                               complexity=complexity, category=category, requirements=requirements,
                               execution_profile=execution_profile, task_profile=task_profile, cwd=str(workdir),
@@ -551,8 +553,14 @@ def _dispatch(session_id: str, agent: str, model: str, effort: str, task: str, a
   authorize(st.session(session_id))
   selection_state = st.session(session_id)
   selection_task = persistent_tasks.task_for(session_id) or (accounting.load(selection_state["active_task"]) if selection_state.get("active_task") else None)
-  item = work_item or (previous or {}).get("work_item", "main")
-  attempts = [st.job(j) for j in selection_task["jobs"] if st.job(j).get("work_item", "main") == item] if selection_task else []
+  if not work_item:
+    bound_plan = st.read("plan-" + st.key(plan_id) + ".json", {}) if plan_id else {}
+    work_item = (previous.get("work_item", "main") if previous else bound_plan.get("work_item") or
+      optimizer.default_work_item(task, acceptance, context, str(workdir),
+        "write" if role["workspace"] == "worktree" else "read",
+        required_files, output_files, input_paths, source_inputs_base, snapshot_required_files))
+  item = work_item
+  attempts = [st.job(j) for j in selection_task["jobs"] if optimizer.matches_work_item(st.job(j), item)] if selection_task else []
   last_attempt = next((j for j in reversed(attempts) if at.model_attempted(j)), None)
   selection_plan = st.read("plan-" + st.key(plan_id) + ".json", {}) if plan_id else {}
   if "required_files" in selection_plan:

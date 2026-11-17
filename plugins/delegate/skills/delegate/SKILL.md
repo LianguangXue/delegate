@@ -415,3 +415,14 @@ for run/status/result/verify/tell/extend; no conversation restart or job replay 
 Check --version/doctor and use schema only when new argument details are needed. Native
 Codex/DSH calls retain call codex/call dsh (or --host on convenience commands). Existing
 MCP processes retain their loaded engine; CLI routing does not rewrite cached MCP schemas.
+
+For independent new run requests, omit work_item to derive a stable intent/input key, or
+choose a meaningful distinct name. For corrections retain the returned work_item/resume_job;
+changing context or acceptance changes the automatic key. Do not rename to evade retry limits.
+Accepted review evidence does not create a filesystem checkpoint; reuse still needs an
+explicit current evidence checkpoint and verification.
+Task report exposes native_agents. A stopped native agent may have unknown usage without
+blocking finish. For unconfirmed execution obtain host terminal evidence, then resolve-native
+with native_agent_id/evidence; never assert completion merely because a log is missing.
+Finish still requires completed plugin work and collected required results; incomplete
+accounting stays labeled incomplete and cannot justify cost-saving comparisons.

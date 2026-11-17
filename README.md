@@ -2,7 +2,12 @@
 
 A shared delegation engine for Claude Code, Codex and DeepSeek Harness, with
 per-task model/effort, durable results and configured Claude/Codex/API workers.
-Version 0.26.1. Activation is configurable; new installations default off.
+Version 0.26.2. Activation is configurable; new installations default off.
+
+New runs without a work_item receive a stable intent key; unrelated work no longer
+collides with accepted legacy main jobs. Native execution can finish with honest unknown
+usage instead of waiting forever for missing transcripts. See
+[task identity and completion](docs/TASK-LIFECYCLE.zh-CN.md).
 
 Old conversations can use the stable `delegate-agent` CLI without restarting: each
 invocation follows the currently installed user plugin while existing workers keep their

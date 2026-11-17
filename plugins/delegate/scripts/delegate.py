@@ -55,7 +55,7 @@ DESCRIPTIONS = {
   "delegate_inspect": "Check handoff workspace/liveness and evidence freshness; checkpoint explicit code/data files after validation; metrics shows real model/effort outcomes. Never grants lease takeover.",
   "delegate_handoff": "Bind to an existing am task, record next step, sync or report a structured cross-agent handoff. Never claims a lease or marks am tasks done. Actions: bind/next/sync/report.",
   "delegate_task": "Begin/update/finish/report an end-to-end task or compare accepted complete cases. "
-    "Task accounting includes parent, native subagents and plugin jobs; finish needs evidence. "
+    "Task accounting includes parent, native subagents and plugin jobs; finish needs evidence. Report lists native_agents; resolve-native with native_agent_id and terminal evidence resolves a missing Stop event without inventing usage. "
     "update can accept already-inspected completed child IDs via accepted_jobs and evidence without closing or reclassifying the task; "
     "finish supports the same batch acceptance while finishing the task. Classification is frozen after dispatch. "
     "case_key must identify identical frozen inputs/acceptance for baseline vs optimized. "
@@ -65,7 +65,7 @@ DESCRIPTIONS = {
     "Model preferences are soft: selection_policy compares expected work and known quota pressure before preferences; inspect candidates for alternatives. "
     "Choose main or a concrete agent/model/effort from task complexity, measured history, "
     "allowed pool and quota reset headroom. Pass subtask complexity/category per work_item; omitted values inherit the same work item or parent. Tiny tasks stay in main. "
-    "Use a stable work_item across retries, different IDs for independent stages. Pass returned plan id to "
+    "Omitted work_item on delegate_run derives a deterministic task/acceptance/context/cwd key. Explicit IDs and resume/plan bindings are preserved. Use a stable work_item across retries, different IDs for independent stages. Pass returned plan id to "
     "delegate_run(plan_id=...,work_item=...). Plans are estimates, not savings or pricing guarantees.",
   "delegate_budget": "Read fresh Claude/Codex quota evidence and the current routing recommendation. "
     "Only set claude_remaining_percent when the USER explicitly supplies a /usage value; never guess a percentage. "
@@ -179,8 +179,10 @@ def tool_list() -> list[dict[str, Any]]:
       properties["mode"] = {"type": "string", "enum": ["persistent", "loop"], "default": "persistent"}
       properties["run_spec"]["description"] = "Normal delegate_run task fields: agent/model/effort/task/acceptance/rationale/cwd, optional profile/resources/inputs. No session, resume, work_item or commit overrides. Each step is separate from goal acceptance."
       properties["token_budget"]["description"] = "Observed worker-token admission budget, not a hard in-flight or billing cap. Positive for automatic loop. Unknown usage blocks more inference."
+    if name == "delegate_run":
+      properties["work_item"]["description"] = "Omit for independent new work: derives a stable task/acceptance/context/cwd/input-contract key. Retain returned ID or resume_job for corrections; explicit IDs including main are honored."
     if name == "delegate_task":
-      properties["action"] = {"type": "string", "enum": ["begin", "update", "finish", "report", "list", "compare"]}
+      properties["action"] = {"type": "string", "enum": ["begin", "update", "finish", "report", "list", "compare", "resolve-native"]}
       properties["accepted_jobs"]["description"] = (
         "update or finish only: successfully completed child IDs already inspected by the parent; evidence required. "
         "update records child acceptance without closing/reclassifying the parent or marking unseen reports collected.")
