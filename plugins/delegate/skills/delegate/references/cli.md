@@ -49,7 +49,7 @@ Codex／DSH 原生主会话使用 call codex／call dsh 和原逻辑 session_id�
   "arguments":{
     "session_id":"SID",
     "agent":"codex-builder", "model":"auto", "effort":"auto",
-    "cwd":"/path/to/repo", "operation":"write",
+    "cwd":"/path/to/repo", "operation":"write", "permissions":"auto",
     "source_inputs":["README.md","doc/PLAN.md"],
     "required_files":["README.md","doc/PLAN.md"],
     "task":"同步这两份草稿，保留其他 session 的改动",

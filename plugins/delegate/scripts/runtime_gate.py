@@ -8,6 +8,7 @@ import storage as st
 from lifecycle import alive
 
 CAPABILITIES = ['model-deny', 'sol-first', 'snapshot-required-files']
+OPTIONAL_CAPABILITIES = ['mcp-hot-reload']
 MINIMUM = (0, 26, 0)
 
 
@@ -70,8 +71,9 @@ def observe(payload: dict[str, Any]) -> None:
   with st.locked():
     state = st.session(sid)
     records = state.get('runtime_handshakes', {})
+    allowed_caps = set(CAPABILITIES) | set(OPTIONAL_CAPABILITIES)
     records[name.rsplit('__', 1)[0]] = {'version': version,
-      'capabilities': [x for x in caps if isinstance(x, str) and x in CAPABILITIES] if isinstance(caps, list) else [],
+      'capabilities': [x for x in caps if isinstance(x, str) and x in allowed_caps] if isinstance(caps, list) else [],
       'observed_at': time.time(), 'identity': runtime.get('identity')}
     state['runtime_handshakes'] = dict(list(records.items())[-16:])
     st.save_session(sid, state)
@@ -92,14 +94,44 @@ def rejection(payload: dict[str, Any]) -> str:
     return 'Delegate launch session_id must match the owning session'
   record = st.session(sid).get('runtime_handshakes', {}).get(name.rsplit('__', 1)[0], {})
   version = record.get('version', '')
+  caps = record.get('capabilities', [])
   capable = (isinstance(version, str) and re.fullmatch(r'\d+\.\d+\.\d+', version)
     and tuple(map(int, version.split('.'))) >= MINIMUM
-    and set(CAPABILITIES) <= set(record.get('capabilities', [])) and live_identity(record.get('identity')))
+    and set(CAPABILITIES) <= set(caps) and live_identity(record.get('identity')))
   if capable:
+    import capabilities
+    effective_ver = tuple(map(int, version.split('.')))
+    spec_items = (
+      [args, args['run_spec']]
+      if name.endswith('__delegate_loop') and isinstance(args.get('run_spec'), dict)
+      else [args]
+    )
+    needs_sandbox_controls = False
+    for item in spec_items:
+      raw_perm = item.get('permissions')
+      perm = None
+      if isinstance(raw_perm, str) and raw_perm.strip():
+        try:
+          perm = capabilities.normalize_permissions(raw_perm)
+        except ValueError:
+          perm = None
+      if (perm in {'network-shell', 'full-access'}
+          or bool(item.get('writable_roots'))
+          or item.get('network_access') is not None):
+        needs_sandbox_controls = True
+        break
+    if needs_sandbox_controls and effective_ver < (0, 26, 7):
+      return (
+        'New delegate launch blocked: this MCP connection predates delegate >=0.26.7 '
+        'parent sandbox controls (writable_roots, network_access, network-shell/full-access; observed: '
+        + version
+        + '). Use delegate-agent call with the SAME session_id, or run /reload-plugins --force / restart.'
+      )
     return ''
   return ('New delegate launch blocked: this MCP connection has not demonstrated delegate >=0.26.0 policy capabilities '
-    '(observed: ' + (version or 'unknown') + '). Call this connection delegate_control(action="status") once. '
-    'If it is old, use current delegate-agent call with the SAME session_id, or reconnect when current work permits. '
+    '(observed: ' + (version or 'unknown') + '). Call delegate_control(action="status") once on the current '
+    'connection (no session restart needed after /reload-plugins). If the server is old, use delegate-agent call '
+    'with the SAME session_id, or run /reload-plugins --force. '
     'Existing jobs may still be inspected, collected, steered or cancelled; do not rerun them to upgrade.')
 
 

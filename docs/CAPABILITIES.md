@@ -1,6 +1,13 @@
 # Supported surfaces and acceptance boundaries
 
-Delegate implementation: 0.26.2; optional am integration: 0.4.0+. Linux, Python 3.12+.
+Delegate implementation: 0.28.1; optional am integration: 0.4.0+. Linux, Python 3.12+.
+
+0.26.5 adds parent-selectable subagent `permissions` (`auto`, `read-only`, `workspace-write`,
+`workspace-shell`) on `delegate_run`, `delegate_plan`, and `delegate_loop` (`run_spec`),
+directly overriding role defaults. Isolated worktrees under `~/.claude` state relocate outside
+`.claude/` (`~/.local/share/claude-delegate/worktrees`), `workspace-write` uses `acceptEdits`,
+`workspace-shell` grants `Bash` + `bypassPermissions`, and `claude_worker` redacts parsed JSON
+structures so integer env values cannot corrupt JSON output.
 
 0.23 adds a discoverable CLI, complete Markdown artifacts, compact verification and
 duplicate-result receipts. Current CLI paths preserve session ownership while bypassing

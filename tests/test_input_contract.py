@@ -157,6 +157,8 @@ class InputContractTests(unittest.TestCase):
     self.assertTrue(report["execution_policy_verified"])
     self.assertEqual(rpc.call.call_args.args[0], "command/exec")
     self.assertEqual(rpc.call.call_args.args[1]["sandboxPolicy"], policy)
+    self.assertEqual(rpc.call.call_args.args[1]["timeoutMs"], 90000)
+    self.assertEqual(rpc.call.call_args.kwargs["timeout"], 120)
     self.assertNotIn("Analyze the supplied", json.dumps(report))
 
   def test_failed_codex_file_probe_sends_no_account_thread_or_turn(self) -> None:

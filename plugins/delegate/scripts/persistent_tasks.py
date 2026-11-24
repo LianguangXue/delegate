@@ -19,6 +19,7 @@ import source_inputs
 import runtime
 import storage as st
 from lifecycle import ACTIVE, alive, group_running, identity, reconcile
+import hosts
 
 TERMINAL = {"completed", "cancelled", "stopped"}
 IDLE = TERMINAL | {"paused", "awaiting_review", "blocked"}
@@ -176,10 +177,19 @@ def validate_spec(session_id: str, spec: dict[str, Any], one_shot: bool, mode: s
   for key in ("agent", "model", "effort", "task", "acceptance", "rationale", "cwd"):
     if not isinstance(spec.get(key), str) or not spec[key].strip():
       raise ValueError("run_spec requires nonempty " + key)
+  import capabilities
+  if "permissions" in spec:
+    capabilities.normalize_permissions(spec["permissions"])
+  if "execution_profile" in spec and spec["execution_profile"] is not None:
+    capabilities.validate_profile(spec["execution_profile"])
+  if "network_access" in spec:
+    capabilities.normalize_network_access(spec["network_access"])
   if any(len(spec[k]) > 200 for k in ("agent", "model", "effort")):
     raise ValueError("Persistent model/role identifiers must be at most 200 characters")
   if not Path(spec["cwd"]).is_dir():
     raise ValueError("run_spec cwd must exist")
+  if "writable_roots" in spec:
+    capabilities.normalize_writable_roots(spec["writable_roots"], base_cwd=spec["cwd"])
   cfg, state = st.config(), st.session(session_id)
   if not one_shot and state["mode"] != "auto":
     raise ValueError("Persistent execution requires session opt-in or an explicit one_shot request")
@@ -219,7 +229,7 @@ def describe(loop: dict[str, Any]) -> dict[str, Any]:
     "goal_acceptance": loop["goal_acceptance"][:4000], "goal_acceptance_truncated": len(loop["goal_acceptance"]) > 4000,
     "child": public_child or None, "child_is_previous": bool(current and not loop.get("current_job")),
     "notice_after": loop.get("ack_seq", 0),
-    "wait_command": "delegate-agent loop-wait" + (" " + host if host in {"codex", "dsh"} else ""),
+    "wait_command": "delegate-agent loop-wait" + (" " + host if host in hosts.NATIVE_HOSTS else ""),
     "wait_stdin": {"session_id": loop["session_id"], "loop_id": loop["id"], "after": loop.get("ack_seq", 0)},
     "record_path": str(st.root() / ("loop-" + loop["id"] + ".json")),
     "controller_log": str(st.root() / ("loop-stderr-" + loop["id"] + ".txt")),
@@ -644,11 +654,25 @@ def manage(session_id: str, action: str = "list", loop_id: str = "", mode: str =
       or bool(cfg.get("model_policy", {}).get("deny_models"))
       or any(row.get("deny_models") for group in ("agents", "providers") for row in cfg[group].values()))
     spec = {**loop["run_spec"], **(run_spec or {})}
-    requires_new = policy_active or spec.get("snapshot_required_files") or spec.get("source_inputs_base") == "cwd" or spec.get("escalate")
+    import capabilities
+    norm_perm = capabilities.normalize_permissions(spec.get("permissions"))
+    has_permissions = norm_perm != "auto"
+    needs_v26_7 = (
+      norm_perm in {"network-shell", "full-access"}
+      or bool(spec.get("writable_roots"))
+      or spec.get("network_access") is not None
+    )
+    requires_new = (
+      policy_active or spec.get("snapshot_required_files")
+      or spec.get("source_inputs_base") == "cwd" or spec.get("escalate") or has_permissions
+      or needs_v26_7
+    )
     if requires_new:
       version = runtime_image.job_version(loop)
-      if version == "unknown" or tuple(map(int, version.split("."))) < (0, 26, 0):
-        raise ValueError("This persistent controller predates policy/input enforcement; preserve its results and create a current-runtime task before new inference")
+      minimum = (0, 26, 7) if needs_v26_7 else (0, 26, 5) if has_permissions else (0, 26, 0)
+      if version == "unknown" or tuple(map(int, version.split("."))) < minimum:
+        raise ValueError("This persistent controller predates policy/input enforcement; "
+          "preserve its results and create a current-runtime task before new inference")
     spec["cwd"] = str(Path(spec["cwd"]).resolve(strict=True))
     if loop.get("resolved_agent") and spec["cwd"] != loop["run_spec"]["cwd"]:
       raise ValueError("Persistent conversation retains its original source cwd")

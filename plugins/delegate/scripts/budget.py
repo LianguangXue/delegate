@@ -248,13 +248,15 @@ def report(session_id: str, claude_remaining_percent: float | None = None,
 def notice(session_id: str) -> tuple[str, str]:
   """Provide concise, deduplicatable routing context for Claude's next decision."""
   value = recommendation(session_id)
-  signature = json.dumps({k: value[k] for k in ("mode", "claude_remaining_percent", "codex_remaining_percent", "external_agents")})
-  text = ("Quota-aware delegation: " + signature + ". " + value["reason"] +
-          " Query delegate_budget for evidence. When external-preferred/handoff, delegate whole independent stages, "
-          "not only reviews; avoid doing the same work twice in main. Preserve acceptance checks. "
-          "Use available concurrency only for independent tasks, choose model and effort for expected total cost, "
-          "and batch related subtasks to amortize context overhead. Do not create Claude-native subagents to save Claude quota: "
-          "they consume the same account. Continue to honor the session pool and default-off boundary.")
+  signature = json.dumps({k: value[k] for k in (
+    "mode", "claude_remaining_percent", "codex_remaining_percent", "external_agents"
+  )})
+  text = (
+    "Quota routing " + signature + ": " + value["reason"] + " "
+    "Under external-preferred/handoff, delegate most independent stages while keeping acceptance in main; "
+    "avoid duplicate work or Claude-native subagents. Choose model/effort for expected total cost and query "
+    "delegate_budget for raw evidence."
+  )
   return signature, text
 
 

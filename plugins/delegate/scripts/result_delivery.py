@@ -9,8 +9,10 @@ import tempfile
 import time
 
 import storage as st
+import attempts as at
 import runtime_image
 from lifecycle import ACTIVE
+import hosts
 
 DEFAULT_LIMIT = 24000
 MAX_LIMIT = 32000
@@ -80,9 +82,15 @@ def receipt(job: dict[str, Any], unchanged: bool = False) -> dict[str, Any]:
     result.update(review_evidence=evidence[:1024], review_evidence_truncated=len(evidence) > 1024)
   if job.get("error"):
     result["error"] = str(job["error"])[:2000]
+  advice = at.recovery_advice(job)
+  if advice is not None:
+    result["recovery_advice"] = advice
   host = st.session(job["session_id"]).get("host_kind", "claude")
-  result["export_command"] = ("delegate-agent result " + job["id"] + " --session-id " + job["session_id"] +
-    (" --host " + host if host in {"codex", "dsh"} else "") + " --output /tmp/delegate-" + job["id"] + "-" + digest[:12] + ".md")
+  result["export_command"] = (
+    "delegate-agent result " + job["id"] + " --session-id " + job["session_id"]
+    + (" --host " + host if host in hosts.NATIVE_HOSTS else "")
+    + " --output /tmp/delegate-" + job["id"] + "-" + digest[:12] + ".md"
+  )
   if len(serialize(result).encode("utf-8")) > 12000:
     result = {**compact(result), "result_view": "receipt", "result_text_included": False,
       "result_sha256": digest, "result_total_chars": len(text), "result_delivery_complete": complete,

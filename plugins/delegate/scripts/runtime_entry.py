@@ -71,6 +71,7 @@ def main(argv: list[str]) -> int:
     if len(argv) < 2 or argv[0] != '--fallback':
       raise ValueError('Managed entry requires --fallback ENGINE before user arguments')
     target = resolve(Path(argv[1]))
+    os.environ['DELEGATE_MANAGED_ENTRY'] = '1'
     os.execv(sys.executable, [sys.executable, '-B', str(target), 'cli', *argv[2:]])
   except (OSError, ValueError, TypeError) as exc:
     print(json.dumps({'error':str(exc), 'help':'Repair/refresh the managed delegate installation; do not rerun completed jobs'}), file=sys.stderr)

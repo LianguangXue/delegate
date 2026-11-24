@@ -12,7 +12,7 @@ import stat
 
 import storage as st
 
-VERSION = "0.26.2"
+VERSION = "0.28.1"
 _VERSIONS: dict[str, str] = {}
 
 
@@ -68,6 +68,13 @@ def verify(directory: Path, expected: str) -> None:
     raise ValueError("Server/worker runtime mismatch; restart the parent on the installed release")
 
 
+def _source_version(files: dict[str, bytes]) -> str:
+  """Extract ``VERSION`` from ``runtime_image.py`` bytes, falling back to ``VERSION``."""
+  raw = files.get("runtime_image.py", b"").decode("utf-8", errors="replace")
+  match = re.search(r'^VERSION\s*=\s*"(\d+\.\d+\.\d+)"', raw, re.M)
+  return match[1] if match else VERSION
+
+
 def freeze(source: Path) -> dict[str, Any]:
   """Capture stable, compilable sources, then publish a read-only image atomically."""
   source = source.resolve()
@@ -90,8 +97,9 @@ def freeze(source: Path) -> dict[str, Any]:
     try:
       for name, data in files.items():
         (temp / name).write_bytes(data)
+      stamped = _source_version(files)
       (temp / "runtime-image.json").write_text(
-        json.dumps({"digest": fingerprint, "version": VERSION, "files": sorted(files)})
+        json.dumps({"digest": fingerprint, "version": stamped, "files": sorted(files)})
       )
       for path in temp.iterdir():
         path.chmod(0o400)
@@ -117,6 +125,7 @@ def freeze(source: Path) -> dict[str, Any]:
 def bootstrap() -> None:
   """Re-exec entrypoints from a frozen image before importing the service graph."""
   source = Path(__file__).resolve().parent
+  os.environ.setdefault("DELEGATE_ORIGIN_SCRIPTS", str(source))
   image = freeze(source)
   if Path(image["path"]) != source:
     os.execv(sys.executable, [sys.executable, "-B", str(Path(image["path"]) / "delegate.py"), *sys.argv[1:]])

@@ -1,6 +1,6 @@
 ---
 name: delegate
-description: Delegate bounded work from DeepSeek Harness to Codex, Claude or DeepSeek with per-task model/effort, quota constraints and durable results. Use for substantial independent work, not tiny queries.
+description: Delegate bounded work from DeepSeek Harness to Codex, Claude, Antigravity/Gemini or DeepSeek with zero-token advisory routing, per-task model/effort, quota constraints and durable results. Use for substantial independent work, not tiny queries.
 ---
 
 Use the delegate MCP server. On first use call delegate_host with this conversation's
@@ -8,6 +8,19 @@ actual native ID if available. Otherwise omit it and retain the generated native
 Keep the returned logical session_id in this conversation and pass it to all delegate
 tools. Do not reuse another parent session's ID. Reconnects can re-register the same
 native ID; missing IDs must not be guessed from profile/user names.
+
+## 4×4 Cross-Host Matrix & Zero-Token Dispatch Rules (0.28.0)
+
+Fast CLI one-liners across all 4 hosts (`claude`, `codex`, `antigravity`/`agy`, `dsh`):
+- `delegate-agent advise "task" --host dsh [--workflow dual-plan|copy-ux|backend-module|gate-review|bulk-cheap] [--lines 30]`
+- `delegate-agent ask <codex-build|codex-review|agy|claude-build|deepseek> "task" --host dsh [--blind] [--review-gate]`
+
+Apply zero-token Khazix-style routing before spawning a worker:
+- **Inline gate (`estimated_lines<=40`)**: keep <=40-line edits, quick fixes, and tightly coupled changes inline in DSH so handoff cost never exceeds the work.
+- **Blind second opinion (`workflow="dual-plan"`, `blind_context=true` / `--blind`)**: on big architecture decisions, dispatch `agy-advisor` (`antigravity` read-only) with ONLY raw user intent + verified code facts (never your draft); verify `[speculative]` claims against code.
+- **UX/copy & frontend (`workflow="copy-ux"` / `"frontend"`)**: use `agy-advisor` for natural UI copy/interaction review and `claude-builder` for visual frontend work.
+- **Backend/algo & 2-tier gate review (`workflow="backend-module"` / `"gate-review"`)**: use `codex-builder` (`gpt-6.1-terra` `low` simple, `gpt-6.2-sol`/`gpt-6.1-sol` `medium`/`high` standard; `astra` strictly complex-only with `escalate=true`) for frozen-interface backend modules, and `codex-reviewer` (`gpt-6.2-sol` `high`, `xhigh` ONLY on sensitive auth/permission/money/external-message/publish paths, `review_gate=true`) enforcing `BLOCKING` vs `ADVISORY` severity with **max 2 review rounds**.
+- **Cheap bulk (`workflow="bulk-cheap"`)**: DeepSeek workers default to `deepseek-flash` across all tiers (avoid `v4-pro` unless requested).
 
 Declare actual GPU/SSH/task-network needs via requirements, including already-allocated
 gpu_devices strings and direct TCP host/port targets. Do not infer GPU use from code review
@@ -30,14 +43,25 @@ reattaches an existing child rather than replaying paid work. Keep original sess
 status/result/verify/tell/pause/cancel supervise owned work, not final goal acceptance.
 Check server_runtime.version; installation alone does not update a connected server.
 Read the brief before routing; pass required_files/output_files and shell requirements.
-File-tool reviewers cannot read outside cwd or write reports. For dirty builders use
-selected source_inputs with relative worker paths; use report text for read-only analysis.
+File-tool reviewers (`read-only`/`workspace-write`) cannot read outside cwd or run shell tests.
+For dirty builders use selected source_inputs with relative worker paths; use report text for
+read-only analysis. Choose `permissions="auto"|"read-only"|"workspace-write"|"workspace-shell"|"network-shell"|"full-access"`
+along with optional `writable_roots=[...]` and `network_access=true|false` directly per subtask
+(parent selection overrides role defaults: `network-shell` enables sandbox `networkAccess`, `full-access`
+uses host/dangerFullAccess, `writable_roots` authorizes shared data dirs outside cwd, and
+`workspace-shell`/`network-shell`/`full-access` grant `Bash` + `bypassPermissions` to Claude/DeepSeek workers).
 For substantial work choose role/model/effort or call delegate_run with all three auto,
 category/work_item, cwd, task, acceptance and rationale. Analyze each child here and pass
-task_profile(kind,scope,uncertainty,risk,validation,optional requires_shell/reason); omit
-complexity/use auto. Fast bounded execution prefers Terra/low, file-only DeepSeek Flash/low,
-daily work Sol/medium, high-risk/uncertain work Astra/high. Don't spawn a classifier model.
-Tests/replay require shell-capable roles; explicit model choices remain authoritative. Keep tiny work in
+task_profile(kind,scope,uncertainty,risk,validation,optional reasoning/requires_shell/reason); omit
+complexity/use auto. DeepSeek defaults to `deepseek-flash` across simple/standard/complex (do NOT select
+`deepseek-v4-pro` unless explicitly requested or escalated on complex work). On Codex, fast bounded
+low-risk work prefers Terra/low; daily and cross-module implementation/debugging/review/replay prefers
+Sol/medium (stepping up to Sol/high for reasoning="high", validation="replay", risk="high" with tests,
+or cross-module debugging/review). Reserve Codex Astra/high STRICTLY for genuinely complex tasks
+(architecture, system-wide high risk/uncertainty, compound risk="high"+uncertainty="high", or unverified
+high risk) with escalate=true under sol-first — never pick Astra casually or inflate risk/scope on
+routine work, or Codex quota will be exhausted quickly. Don't spawn a classifier model.
+Tests/replay require a Codex role or explicit `permissions="workspace-shell"`; explicit model choices remain authoritative. Keep tiny work in
 main. Prefer independently checkable output over extra coordination.
 
 Parent is DeepSeek Harness: do not report Claude quota as your own. Unknown parent usage remains
@@ -79,7 +103,7 @@ bounds. For long computations select timeout_seconds=0 explicitly, require check
 run-specific completion receipts. New Codex workers can use delegate_wait to wait in code;
 background sandbox commands are not guaranteed to survive a completed/timed-out job.
 
-Use operation="read" for review and "write" for edits, never a task description.
+Use operation="read" for review and "write" for edits, or select `permissions` (`auto`/`read-only`/`workspace-write`/`workspace-shell`) directly, never a task description.
 Fixed roles support model/effort="auto" within their provider. Query DeepSeek choices
 with delegate_catalog(agent_name="deepseek-company-reviewer"); default model lists are Codex-only.
 For draft documents, source_inputs=["README.md","doc/PLAN.md"] snapshots only explicit
@@ -111,9 +135,9 @@ workers may share quota. Recommendations do not create a scheduler or authorize 
 
 ## Policy and snapshot admission (0.26)
 
-Check the connected delegate_control status server_runtime.version/capabilities. A newer
-installed hook/CLI does not upgrade an old connection. Use current CLI and original SID
-if a launch is gated; keep result/tell/extend/cancel available for existing work.
+Check the connected delegate_control status server_runtime.version/capabilities. >=0.26.8
+host-mcp connections hot-reload in place when user plugins or local directory marketplaces
+update; older connections can use the current CLI with the same logical SID if gated.
 Hard deny_models apply to explicit choices too. Optional sol-first requires escalate=true
 or evidenced Sol quality failure before Astra, while capability floors remain in force.
 Do not reclassify risk or change work_item to bypass a policy rejection. Installing does

@@ -1,8 +1,10 @@
-# 快速安装：Claude Code、Codex、DeepSeek Harness
+# 快速安装：Claude Code、Codex、Antigravity、DeepSeek Harness
 
-当前实现：delegate 0.26.2；可选 am 0.4.0+。运行环境：Linux、Python 3.12+。
+当前实现：delegate 0.28.1；可选 am 0.4.0+。运行环境：Linux、Python 3.12+。
 只安装你需要的入口即可，不必装齐所有模型。Python 核心无需第三方包。
 本文不包含或要求上传任何 API Key。
+
+0.28.0 增加 **四宿主与四类 worker 的适配**（新增 `antigravity` / `agy` worker provider 与 `agy-advisor`、`agy-builder` 默认手动角色），提供零额外模型 Token 的卡兹克式协同分流（`workflow`、`<=40` 行内联门禁、`blind_context` 独立盲审、`review_gate` 两级严重度 + 最多 2 轮熔断、`gpt-6.2-sol` 敏感路径 `xhigh`）以及极简 CLI 子命令 `delegate-agent advise` / `delegate-agent ask`；`install-hosts.py dsh --dsh-profile web,tui` 支持多 profile 一次安装。见 [按子任务选型与协同分流](ROUTING.zh-CN.md)。
 
 0.26.1 提供跟随当前用户级安装版本的稳定 CLI，旧会话不必重启即可调用新版参数。
 见 [旧会话接入](SESSION-BRIDGE.zh-CN.md)。
@@ -55,6 +57,7 @@ GPU／SSH／任务命令联网需求应在派发时通过 requirements 声明；
 - 用 Claude worker：安装 Claude Code 并完成终端认证，确认自己的模型／effort可用。
 - 用 DeepSeek worker：仍需 Claude CLI（它是 API worker 执行器），再配置独立的
   Anthropic-compatible provider。普通 OpenAI-compatible endpoint 不能直接替代它。
+- 用 Antigravity（`agy`）worker：安装本机 `agy` CLI 并完成登录，用 `agy models` 核对可用模型。默认角色 `agy-advisor`（只读方案盲审／文案交互顾问）与 `agy-builder`（隔离 worktree）为手动按需调用（`automatic=false`），不影响原有自动路由确定性。
 - 用 DSH 作为主控：先按 [DeepSeek Harness 官方说明](https://github.com/deepseek-ai/deepseek-harness)
   安装并初始化一个能正常运行的 profile。本项目不安装 DSH，也不自动开户或登录。
 
@@ -125,7 +128,7 @@ Codex／DSH 没有 Claude 的 `/delegate` 命令解析入口，使用自然语�
 在上述 clone 的仓库中执行：
 
 ```sh
-python3 scripts/install-hosts.py dsh --dsh-profile web
+python3 scripts/install-hosts.py dsh --dsh-profile web,tui
 ```
 
 profile 名称可换成自己**已初始化**的 profile。脚本使用 `DSH_HOME`（未设置则
@@ -147,6 +150,26 @@ DSH 主账号与 worker 账号分开。无法确认当前 DSH 账号对应哪个
 它们不会自动继承 web profile 的 MCP entry，需给那个环境添加相同 overlay。
 运行工具后的实际返回才是验收。不要在故障时用禁用沙箱、改 HOME 或借用其他
 账号来掩盖配置问题。
+
+## 2D. Antigravity（反重力）入口
+
+在本仓库执行：
+
+```sh
+python3 scripts/install-hosts.py antigravity
+```
+
+脚本会在 agy 读取的 `~/.gemini/config` 下备份并更新 `mcp_config.json`
+（加入 `"delegate"` stdio MCP 服务，命令 `delegate-agent host-mcp antigravity`，携带
+`DELEGATE_STATE_DIR`、`CODEX_HOME`、`CLAUDE_CONFIG_DIR`），同时将全局技能链接到
+`~/.gemini/config/skills/delegate`。在反重力会话中调用 `delegate_host` 注册会话后，
+即可调度 Codex、DeepSeek（默认 `deepseek-flash`）与 Claude Code（`claude-explorer` /
+`claude-reviewer` / `claude-builder`）子 agent；若当前会话尚未加载 MCP，可直接使用
+`delegate-agent call antigravity` 配合相同 `session_id` 调用。
+
+agy 作为 MCP 宿主可以发起委派。反向使用 `agy -p` 作为第三方 agent 的 worker
+取决于 Google 的账号与方案。Google 的个人订阅目前不支持这种封装，第三方 Gemini
+集成请使用官方支持的 API。见 [Antigravity FAQ](https://antigravity.google/docs/faq/#can-i-use-antigravity-cli-headless-mode-in-third-party-coding-agents-or-automate-account-switching)。
 
 ## 3. 可选：安装 am
 

@@ -21,9 +21,13 @@ class OrchestrationTests(unittest.TestCase):
         "status": "known", "data": {"five_hour": {"used_percentage": 20}}}
     with patch("service.quota", side_effect=quota):
       result = opt.plan("s", task_profile=HARD)
-    self.assertEqual((result["provider"], result["model"], result["effort"]), ("company", "deepseek-v4-pro", "high"))
+      escalated = opt.plan("s", work_item="escalated", task_profile=HARD, escalate=True)
+    self.assertEqual((result["provider"], result["model"], result["effort"]), ("company", "deepseek-flash", "high"))
     self.assertEqual(result["selection_policy"]["deferred_low_headroom"], ["codex"])
     self.assertTrue(any(c.get("model") == "gpt-6-astra" for c in result["candidates"]))
+    self.assertEqual(
+      (escalated["provider"], escalated["model"], escalated["effort"]), ("company", "deepseek-v4-pro", "high"),
+    )
 
   def test_unknown_alternative_quota_does_not_claim_surplus(self) -> None:
     with patch("service.quota", side_effect=lambda provider, **kw: {
@@ -70,8 +74,15 @@ class OrchestrationTests(unittest.TestCase):
     self.assertTrue(fast["assessment"]["requires_shell"])
     unchecked = opt.plan("s", operation="write", task_profile={**scoped, "validation": "inspection"})
     self.assertEqual(unchecked["complexity"], "standard")
-    risky = opt.plan("s", operation="write", task_profile={**scoped, "risk": "high"})
-    self.assertEqual(risky["complexity"], "complex")
+    high_risk_tested = opt.plan("s", operation="write", task_profile={**scoped, "risk": "high"})
+    self.assertEqual((high_risk_tested["complexity"], high_risk_tested["model"], high_risk_tested["effort"]),
+                     ("standard", "gpt-6.1-sol", "high"))
+    unverified_risky = opt.plan(
+      "s", operation="write", task_profile={**scoped, "risk": "high", "validation": "inspection"},
+    )
+    self.assertEqual(unverified_risky["complexity"], "complex")
+    compound_risky = opt.plan("s", operation="write", task_profile={**scoped, "risk": "high", "uncertainty": "high"})
+    self.assertEqual(compound_risky["complexity"], "complex")
 
   def test_empirical_cheapest_fifth_model_is_not_lost_by_catalog_shortlist(self) -> None:
     self.codex["models"] = [{"model": 'fixture-sol-'+str(i), 'supportedReasoningEfforts': [{'reasoningEffort':'medium'}]}

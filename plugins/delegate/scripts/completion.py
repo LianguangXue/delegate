@@ -8,6 +8,7 @@ import uuid
 import storage as st
 from lifecycle import ACTIVE, alive, identity, reconcile
 import result_delivery
+import hosts
 
 LEASE_SECONDS = 30
 
@@ -101,7 +102,7 @@ def close(job_id: str, token: str) -> None:
 def describe(job: dict[str, Any]) -> dict[str, Any]:
   """Expose a usable waiter command and honest delivery/collection status."""
   host = st.session(job["session_id"]).get("host_kind", "claude")
-  suffix = " " + host if host in {"codex", "dsh"} else ""
+  suffix = " " + host if host in hosts.NATIVE_HOSTS else ""
   watchers = live(job)
   return {"mode": job.get("completion_mode", "wait"), "watcher_active": bool(watchers),
     "watchers": [{"kind": r["kind"], "parent_mode": r.get("parent_mode"),

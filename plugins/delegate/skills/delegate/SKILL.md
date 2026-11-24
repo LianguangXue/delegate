@@ -12,22 +12,41 @@ Use the delegate MCP tools with this exact session ID. If unavailable, report th
 quoted heredoc. Never interpolate task text or credentials into shell code.
 
 Before the first substantial dispatch, check the CONNECTED MCP delegate_control status
-server_runtime.version once. Installing a release does not replace that connection.
-If old/missing, use the installed delegate-agent call with the same session_id or a
-current session. A CLI version proves only the CLI, not the connected MCP. Never rerun
-an already accepted review merely to migrate its bookkeeping.
+server_runtime.version once. MCP servers >=0.26.8 support zero-restart hot-reloading on
+plugin update / local marketplace edits / `/reload-plugins` (emitting `tools/list_changed`).
+If connected to an older pre-0.26.8 server (or if `/reload-plugins --force` replaced the MCP PID),
+either call `delegate_control(action="status")` once to refresh the handshake (when >=0.26.0) or
+use the installed `delegate-agent call` CLI with the SAME `session_id`; never rerun an already
+accepted review merely to migrate its bookkeeping.
 
-If a plugin upgrade leaves an older MCP connected (legacy runtime identity errors,
+If a plugin upgrade leaves a pre-0.26.8 MCP server connected (legacy runtime identity errors,
 or old attempt-limit errors after only pre-inference failures), stop retrying that
-connection. Use the installed `delegate-agent call` with the SAME JSON name/arguments
-and session_id for control/plan/run/result. This starts the current frozen service and
-keeps the original task state and authorization checks. A new session also works;
-`/reload-plugins` may defer MCP changes until then in non-terminal hosts. Never weaken
-runtime identity checks or increase max_attempts merely to bypass an upgrade failure.
+connection. Run `/reload-plugins --force` (followed by `delegate_control(action="status")`),
+or use the installed `delegate-agent call` with the SAME JSON name/arguments and `session_id`
+for control/plan/run/result. Both preserve the original task state and authorization checks.
+On `/reload-plugins` with `>=0.26.8`, the live MCP engine updates automatically without
+restarting the session. Never weaken runtime identity checks or increase `max_attempts`
+merely to bypass an upgrade failure.
 The current CLI is discoverable: delegate-agent --help, call --help, doctor and schema.
 For old connections use it consistently, including result and verify. Full report:
 delegate-agent result JOB --session-id SID --output REPORT.md. It returns a path/hash,
 not the report body. Input format and dirty-builder example are bundled in [CLI guide](references/cli.md).
+
+## 4×4 Cross-Host Matrix & Zero-Token Advisory Dispatch (0.28.0)
+
+Any of the 4 parent hosts (`claude`, `codex`, `antigravity`/`agy`, `dsh`) can dispatch bounded work
+to any of the 4 worker providers (`claude-*`, `codex-*`, `agy-advisor`/`agy-builder`, `deepseek-*`).
+Fast shell one-liners (0 JSON-heredoc boilerplate):
+- Zero-token route check: `delegate-agent advise "task" --host claude [--workflow auto|dual-plan|copy-ux|backend-module|gate-review|bulk-cheap] [--files a.py] [--lines 30]`
+- One-line dispatch: `delegate-agent ask <codex|codex-review|codex-build|agy|deepseek|claude-review|auto> "task" --host claude [--blind] [--review-gate] [--permissions workspace-shell]`
+
+Apply Khazix-style zero-token dispatch discipline before spawning workers:
+- **Inline break-even gate (`estimated_lines<=40`)**: <=40-line edits, review-comment fixes, tightly coupled UI<->API tweaks, or tasks where the parent is already the top specialist (e.g. Claude on visual frontend) stay inline so handoff overhead never exceeds the task.
+- **Blind second opinion (`workflow="dual-plan"`, `blind_context=true` / `--blind`)**: on major architecture/schema/system decisions, draft your own plan and run `agy-advisor` (`read-only`) in parallel with ONLY raw user intent + verified code facts (no parent draft/opinion); verify `[speculative]` claims against code before merging.
+- **UX & copy polish (`workflow="copy-ux"`)**: implement UI/copy first, then ask `agy-advisor` to humanize stiff AI wording and cross-check factual accuracy before adopting.
+- **Frozen-interface backend/algo (`workflow="backend-module"`)**: delegate self-contained backend/algorithm/data modules with frozen interfaces + tests to `codex-builder` (`gpt-6.1-terra` `low` simple, `gpt-6.2-sol`/`gpt-6.1-sol` `medium`/`high` standard; `astra` strictly complex-only with `escalate=true`).
+- **2-tier gate review (`workflow="gate-review"`, `review_gate=true` / `--review-gate`)**: run pre-merge review on `codex-reviewer` (`gpt-6.2-sol` preferred, `effort="high"`, stepping up to `xhigh` ONLY on sensitive auth/token/permission/billing/money/external-message/publish paths). Enforce `BLOCKING` (concrete money/math bug, data loss, auth bypass, wrong external mutation, or crash with trigger path) vs `ADVISORY` notes, **capped at max 2 review rounds** (`review_round>=2` escalates to the user).
+- **Bulk cheap (`workflow="bulk-cheap"`)**: use `deepseek-flash` default across DeepSeek tiers (avoid `v4-pro` unless requested) or `claude-explorer` (`haiku`).
 
 ## Controls
 
@@ -49,11 +68,12 @@ See the repository docs/PERSISTENT.zh-CN.md for source versus workspace receipt 
 Before dispatch, declare the actual command-execution needs in requirements: gpu/ssh/network
 booleans, allocated gpu_devices strings, and ssh_targets/network_targets host+port objects.
 Read the referenced brief before routing, identify all required inputs and the expected
-deliverable, and pass required_files/output_files. File-tool reviewers are confined to cwd
-and cannot write a report. Use a focused containing cwd only when all inputs actually fit,
+deliverable, and pass required_files/output_files. File-tool reviewers (`read-only`/`workspace-write`)
+are confined to cwd and cannot run shell tests. Use a focused containing cwd only when all inputs
+actually fit, `permissions="workspace-shell"` for DeepSeek/Claude shell access in an isolated worktree,
 or a shell-capable Codex reviewer returning report text. Python/commands require the shell
 profile signal. A dirty source builder needs selected source_inputs; file-tool builders
-must use cwd-relative input/task references for the future worktree, never source absolutes.
+(`workspace-write`) must use cwd-relative input/task references for the future worktree, never source absolutes.
 Explicit required_files (including []) overrides conservative legacy path discovery; it
 does not expand permissions or claim every implicit dependency was checked.
 Reviewing GPU code or reading existing outputs alone does not require GPU access. Never guess
@@ -61,8 +81,9 @@ GPU allocations or use reserved devices. Network targets are direct TCP probe en
 for proxies/jump hosts declare the reachable relay rather than assuming a direct final route.
 execution_profile auto chooses sandboxed/network within role grants and never host. Host is
 explicit and requires a permitted worktree role; it removes OS filesystem isolation. Do not
-enable permissions or drop declarations to evade a failed check. File-tool workers cannot
-perform these command workloads. A preflight passed result is not a GPU lease, SSH login,
+enable permissions or drop declarations to evade a failed check. File-only modes (`read-only`/
+`workspace-write`) cannot execute GPU/SSH/network commands without `permissions="workspace-shell"`
+or a Codex shell role. A preflight passed result is not a GPU lease, SSH login,
 framework validation or business-operation guarantee. Inspect execution_environment.
 If an old MCP schema rejects these fields, use the current fixed CLI with the SAME session_id.
 
@@ -151,12 +172,12 @@ Answer trivial tasks directly without planning or measurement tool calls. Local 
 For substantial independent work use ONE call:
 
 `delegate_run(agent="auto", model="auto", effort="auto", category=..., task_profile=..., operation="read"|"write",
-work_item=..., notify=true, task=..., acceptance=..., rationale=..., cwd=..., context=...)`
+permissions="auto"|"read-only"|"workspace-write"|"workspace-shell"|"network-shell"|"full-access", writable_roots=..., network_access=..., work_item=..., notify=true, task=..., acceptance=..., rationale=..., cwd=..., context=...)`
 
 Before auto selection, reason in this turn about EACH work_item and provide task_profile:
 kind (lookup/documentation/mechanical/implementation/review/debugging/architecture/research),
 scope (bounded/cross-module/system), uncertainty/risk (low/medium/high), validation
-(inspection/tests/replay), optional requires_shell and a short reason. Do not delegate
+(inspection/tests/replay), optional reasoning (low/medium/high), requires_shell and a short reason. Do not delegate
 classification to another model, count keywords or copy the whole project's difficulty.
 Omit complexity or use auto to derive it; an explicit level is a minimum. A clear child
 of a complex project can still use the fast lane. Missing information stays conservative;
@@ -165,17 +186,22 @@ This classifies, plans, dispatches and waits. It may return main/wait/reuse/repl
 that is a decision, not task completion. Use separate delegate_plan only when examining choices is useful.
 Explicit user model choices can use the explicit role/model/effort path. Do not silently override them.
 
-Roles define responsibilities and permissions; model and effort vary per task. Prefer the least costly
-likely-successful choice, considering retries and parent overhead. Use these subtask boundaries:
+Roles define default responsibilities, while `permissions`
+(`auto`/`read-only`/`workspace-write`/`workspace-shell`/`network-shell`/`full-access`),
+`writable_roots=[...]` (shared data dirs outside `cwd`), and `network_access=true|false`
+let the parent select per-subtask sandbox, filesystem, and network/GitLab permissions directly
+(overriding role workspace/tool/profile defaults);
+model and effort vary per task. Prefer the least costly likely-successful choice, considering
+retries and parent overhead. Use these subtask boundaries:
 - trivial: tiny direct answer or one small lookup; keep it in main without a worker.
-- simple: bounded clear low-risk work; Terra/low for execution, DeepSeek Flash/low for file-only work.
-- standard: ordinary implementation or review; prefer Sol/medium.
-- complex: architecture/high uncertainty/high correctness risk; prefer Astra/high.
+- simple: bounded clear low-risk work (including bounded low-risk read-only review/research or clear low-risk test runs); Terra/low for execution, DeepSeek Flash/low for file-only work (or `workspace-shell` when shell is explicitly chosen).
+- standard: ordinary implementation, cross-module debugging/review, replay runs, or single-factor risk/uncertainty with tests; prefer Sol/medium (stepping up to Sol/high for `reasoning="high"`, `validation="replay"`, `risk="high"` with tests, or cross-module debugging/review) — or DeepSeek Flash/medium|high (`deepseek-flash` is the default DeepSeek model across all complexity tiers; do NOT pick `deepseek-v4-pro` unless the user explicitly asks or `escalate=true` is used for complex escalation).
+- complex (STRICTLY GATED — Astra ONLY for truly complex work): reserve Codex Astra/high strictly for genuinely `complex` tasks (architecture design, system-wide changes with `risk="high"` or `uncertainty="high"`, compound `risk="high"` + `uncertainty="high"`, `risk="high"` without automated test/replay verification, or an evidenced Sol `needs-work` quality failure). Under `sol-first`, `astra` requires `complexity="complex"` + `escalate=true` (or Sol `needs-work` evidence). NEVER casually select `astra` or inflate `task_profile` (`risk="high"` / `scope="system"`) on routine cross-module bugs, code reviews, or test/replay jobs — Sol/high handles those while protecting Codex quota.
 
 Model families are workflow preferences, not measured cross-provider rankings. Respect
-catalog support, quotas, role/account allowlists and actual tool requirements. File-tool
-providers cannot run tests/replays; do not turn execution into extra parent work by routing
-it to a file-only worker. Quota can choose among allowed equivalent candidates or eligible
+catalog support, quotas, role/account allowlists and actual tool requirements. File-only
+modes (`read-only`/`workspace-write`) cannot run tests/replays; use Codex or explicit
+`permissions="workspace-shell"` rather than turning execution into extra parent test work. Quota can choose among allowed equivalent candidates or eligible
 fallbacks; never enable manual-only accounts. Automatic effort is capped at xhigh and never
 selects max/ultra. Infrastructure/transport failures do not alone increase effort; a failed
 acceptance can. Explicit user model/effort choices remain authoritative.
@@ -333,7 +359,7 @@ false, including resume: repeat permission explicitly for the new attempt.
 
 The worker edits and checks files; the runtime commits approved paths after the model
 turn and backend cleanup succeed. This supports Codex, Claude and API workers without
-granting the latter a shell. Tell the worker not to run git add/commit itself. Check
+granting `workspace-write` workers a shell (`workspace-shell` grants `Bash`). Tell the worker not to run git add/commit itself. Check
 the returned git_commit receipt (status/commit/files) and actual tests; a commit does
 not imply parent acceptance. Source checkout and remote are not integration targets.
 

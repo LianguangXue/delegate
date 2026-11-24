@@ -2,7 +2,13 @@
 
 A shared delegation engine for Claude Code, Codex and DeepSeek Harness, with
 per-task model/effort, durable results and configured Claude/Codex/API workers.
-Version 0.26.2. Activation is configurable; new installations default off.
+Version 0.26.5. Activation is configurable; new installations default off.
+
+Parent agents can now choose subagent permissions directly on `delegate_run` / `delegate_plan`
+via `permissions` (`auto`, `read-only`, `workspace-write`, `workspace-shell`), overriding a
+role's default workspace/tool tier. Isolated worktrees default outside `.claude/`
+(`~/.local/share/claude-delegate/worktrees`) and Claude/DeepSeek workers run `acceptEdits`
+for `workspace-write` and `bypassPermissions` + `Bash` for `workspace-shell`.
 
 New runs without a work_item receive a stable intent key; unrelated work no longer
 collides with accepted legacy main jobs. Native execution can finish with honest unknown
@@ -146,8 +152,7 @@ credentials. Parent coordination still consumes parent capacity.
 
 Write roles use isolated worktrees retained for review. The source must be clean unless
 explicit `source_inputs` selects draft files to snapshot; the source itself stays untouched.
-Nothing automatically merges or publishes changes. Local worktree commits can be explicitly authorized per attempt. Claude/API workers use restricted
-file tools; parent-owned tests may be needed when shell access is required.
+Nothing automatically merges or publishes changes. Local worktree commits can be explicitly authorized per attempt. Claude/API workers default to restricted file tools under `workspace-write` (parent-owned tests needed) or can be granted `permissions="workspace-shell"` (`Bash` + `bypassPermissions`).
 
 Completed Codex and Claude/API conversations are archived recoverably. Explicit
 resume restores the exact conversation and completion archives it again. Job results
@@ -268,7 +273,7 @@ A builder can return a local commit by setting allow_commit=true, commit_message
 commit_paths on delegate_run. Permission defaults false and must be explicit on each
 resume. Only isolated write worktrees are supported. The model edits/checks files;
 the runtime commits only approved literal paths after successful backend termination.
-Claude/API workers retain their file-only tool restrictions. Read-only roles reject
+Claude/API workers retain restricted file tools under `workspace-write` unless granted `permissions="workspace-shell"`. Read-only roles/attempts reject
 commit authorization. Receipt git_commit contains the hash, actual files and worktree;
 parent acceptance is still required.
 

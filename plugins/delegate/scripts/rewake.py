@@ -86,10 +86,11 @@ def runtime_notice(payload: dict[str, Any]) -> str:
       state["runtime_version_notices"] = (shown + [key])[-16:]
       st.save_session(sid, state)
     return ("This new job was dispatched by delegate " + version + ", while this hook is " + runtime_image.VERSION +
-      ". Installed versions do not replace an already connected MCP server. Before another paid attempt, "
-      "check the MCP delegate_control status server_runtime.version. Use the installed delegate-agent call CLI "
-      "with the SAME session_id=" + sid + " for new dispatch and paginated results, or reload/start a current session. "
-      "Run delegate-agent --help or doctor for the input format. Full text: delegate-agent result JOB --session-id SID --output REPORT.md. "
+      ". Installed versions do not replace a pre-0.26.8 connected MCP server automatically "
+      "(>=0.26.8 hot-reloads in place). Check MCP delegate_control status server_runtime.version; "
+      "use delegate-agent call CLI with SAME session_id=" + sid + ", or run /reload-plugins --force / restart. "
+      "Run delegate-agent --help or doctor for input format. Full text: "
+      "delegate-agent result JOB --session-id SID --output REPORT.md. "
       "Do not rerun a completed review just to upgrade it; preserve its results and acceptance.")
   except (ValueError, OSError, KeyError, TypeError):
     return ""

@@ -45,20 +45,38 @@ class DispatchInputsTests(unittest.TestCase):
         patch("credentials.environment", return_value={}), patch("service.subprocess.Popen", return_value=Mock(pid=os.getpid())):
       result = service.run("s", "company-reviewer", "auto", "auto", "Review", "Evidence", "Bounded review", str(self.root),
         one_shot=True, complexity="standard", operation="read-only review")
-    self.assertEqual((result["provider_name"], result["model"], result["effort"]), ("company", "deepseek-v4-pro", "medium"))
+    self.assertEqual(
+      (result["provider_name"], result["model"], result["effort"]), ("company", "deepseek-flash", "medium"),
+    )
     self.assertEqual(result["selection"]["requested"], {"model": "auto", "effort": "auto"})
     self.assertEqual(st.session("s")["mode"], "off")
 
   def test_role_pair_respects_explicit_choices_allowlists_and_complex_floor(self) -> None:
-    cases = [("auto", "auto", "simple", ("deepseek-flash", "low")),
-      ("deepseek-flash", "auto", "standard", ("deepseek-flash", "medium")),
-      ("auto", "high", "standard", ("deepseek-v4-pro", "high")),
-      ("auto", "auto", "complex", ("deepseek-v4-pro", "high"))]
-    for model, effort, complexity, expected in cases:
-      self.assertEqual(optimizer.role_pair(self.role, self.provider, self.catalog, model, effort, complexity, "company"), expected)
+    cases = [
+      ("auto", "auto", "simple", False, ("deepseek-flash", "low")),
+      ("deepseek-flash", "auto", "standard", False, ("deepseek-flash", "medium")),
+      ("auto", "high", "standard", False, ("deepseek-flash", "high")),
+      ("auto", "auto", "complex", False, ("deepseek-flash", "high")),
+      ("auto", "auto", "complex", True, ("deepseek-v4-pro", "high")),
+    ]
+    for model, effort, complexity, escalate, expected in cases:
+      self.assertEqual(
+        optimizer.role_pair(
+          self.role, self.provider, self.catalog, model, effort, complexity, "company", escalate=escalate,
+        ),
+        expected,
+      )
     role = {**self.role, "models": ["deepseek-flash"]}
+    self.assertEqual(
+      optimizer.role_pair(role, self.provider, self.catalog, "auto", "auto", "complex", "company"),
+      ("deepseek-flash", "high"),
+    )
     with self.assertRaisesRegex(ValueError, "No allowed"):
-      optimizer.role_pair(role, self.provider, self.catalog, "auto", "auto", "complex", "company")
+      optimizer.role_pair(role, self.provider, self.catalog, "auto", "auto", "complex", "company", escalate=True)
+    with self.assertRaisesRegex(ValueError, "No allowed"):
+      optimizer.role_pair(
+        {**role, "efforts": ["low"]}, self.provider, self.catalog, "auto", "auto", "complex", "company",
+      )
     with self.assertRaisesRegex(ValueError, "No allowed"):
       optimizer.role_pair(self.role, self.provider, self.catalog, "nonexistent", "auto", "simple", "company")
 
@@ -82,7 +100,18 @@ class DispatchInputsTests(unittest.TestCase):
     with patch("service.catalog", return_value=self.catalog), patch("service.quota", return_value={"status": "unknown"}), \
         patch("credentials.environment", return_value={}), patch("service.subprocess.Popen", return_value=Mock(pid=os.getpid())):
       result = service.run("s", "company-reviewer", "auto", "auto", "Review", "Evidence", "Why", str(self.root), one_shot=True)
-    self.assertEqual((result["complexity"], result["model"], result["effort"]), ("complex", "deepseek-v4-pro", "high"))
+    self.assertEqual((result["complexity"], result["model"], result["effort"]), ("complex", "deepseek-flash", "high"))
+    with patch("service.catalog", return_value=self.catalog), \
+         patch("service.quota", return_value={"status": "unknown"}), \
+         patch("credentials.environment", return_value={}), \
+         patch("service.subprocess.Popen", return_value=Mock(pid=os.getpid())):
+      escalated = service.run(
+        "s", "company-reviewer", "auto", "auto", "Review", "Evidence", "Why", str(self.root),
+        one_shot=True, escalate=True, work_item="escalated-complex",
+      )
+    self.assertEqual(
+      (escalated["complexity"], escalated["model"], escalated["effort"]), ("complex", "deepseek-v4-pro", "high"),
+    )
 
   def test_catalog_exposes_all_roles_but_scopes_model_lists(self) -> None:
     with patch("service._catalog", return_value={"models": []}) as discovery:

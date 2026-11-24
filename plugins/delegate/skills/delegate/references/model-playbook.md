@@ -3,11 +3,15 @@
 核查日期：2026-11-11。以下流程是本插件的操作建议，模型可用性以账号、
 网关、CLI 和目录实测为准。API 标价不能用来计算订阅剩余额度。
 
-0.20：调用前在当前轮分析每个子任务，传 task_profile(kind/scope/uncertainty/risk/validation)，
-省略 complexity 或用 auto；不新增分类 agent。清晰的低风险执行用 Terra／low，文件处理
-可用 DeepSeek Flash／low，日常 Sol／medium，高风险或复杂 Astra／high。不要按整个项目
-一概分配强模型，也不要以“快”替代能力／验收。tests／replay 需要 shell 角色，file-only
-DeepSeek 不承担命令执行。自动 effort 不选 max／ultra；显式选择仍保留。
+0.26：调用前在当前轮分析每个子任务，传 task_profile(kind/scope/uncertainty/risk/validation)，
+省略 complexity 或用 auto；不新增分类 agent。DeepSeek 全档位默认使用 `deepseek-flash`（除非用户
+明确要求或 complex 任务显式 escalate，否则不用 `deepseek-v4-pro`）。Codex 上清晰的低风险执行用
+Terra／low，日常及跨模块修复/评审/回放用 Sol／medium（需要深思/replay/跨模块排查或有测试保护的
+单因子 high risk 自动升到 Sol／high）。**Codex Astra 仅严格用于真正复杂的任务**（架构设计、全系统级
+高风险/高不确定性、或无自动测试兜底的 high risk，且在 `sol-first` 下需 `escalate=true` 或 Sol
+`needs-work` 实证），绝不可在常规跨模块任务中随意点名 Astra 或虚高填报 `risk="high"`/`scope="system"`，
+避免快速耗尽 Codex 额度。tests／replay 需要 shell 角色或 `permissions="workspace-shell"`。
+自动 effort 不选 max／ultra；显式选择仍保留。
 
 ## 阅读背景
 

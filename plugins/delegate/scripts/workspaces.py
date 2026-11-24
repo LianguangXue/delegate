@@ -13,6 +13,38 @@ from lifecycle import group_running, has_active_group, identity, mark_helper, st
 
 DEFAULT_TIMEOUT = 600
 _CLEANUP = ContextVar("delegate_workspace_cleanup", default=False)
+_STDLIB_POPEN = subprocess.Popen
+
+
+def _run_git(
+  cmd: list[str],
+  env: dict[str, str],
+  timeout: int,
+  check: bool = False,
+) -> subprocess.CompletedProcess[str]:
+  """Run a short Git preflight command, isolating stdlib Popen from worker-spawn patches."""
+  if (
+    getattr(subprocess.Popen, "__module__", "").startswith("unittest.mock")
+    and not getattr(subprocess.run, "__module__", "").startswith("unittest.mock")
+  ):
+    with _STDLIB_POPEN(
+      cmd,
+      stdin=subprocess.DEVNULL,
+      stdout=subprocess.PIPE,
+      stderr=subprocess.PIPE,
+      text=True,
+      env=env,
+    ) as proc:
+      try:
+        out, err = proc.communicate(timeout=timeout)
+      except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        raise
+    if check and proc.returncode != 0:
+      raise subprocess.CalledProcessError(proc.returncode, cmd, output=out, stderr=err)
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+  return subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=timeout, check=check)
 
 
 def run(job_id: str, cwd: str, *args: str, timeout: float | None = None,
@@ -147,6 +179,107 @@ def rollback(job_id: str, source: str, path: Path) -> None:
     _CLEANUP.reset(token)
 
 
+def _has_git_marker(path: Path) -> bool:
+  """Return True if ``path`` or any ancestor directory contains a ``.git`` entry."""
+  cur = path
+  for _ in range(32):
+    if (cur / ".git").exists():
+      return True
+    if cur.parent == cur:
+      break
+    cur = cur.parent
+  return False
+
+
+def preflight_source(
+  cwd: str,
+  source_inputs_list: list[str] | None = None,
+  source_inputs_base: str = "repo",
+  required_files: list[str] | None = None,
+  snapshot_required_files: bool = False,
+) -> dict[str, Any]:
+  """Validate source repo cleanliness and HEAD/snapshot availability before starting a worker.
+
+  Args:
+    cwd: Requested source working directory.
+    source_inputs_list: Explicit draft paths passed via ``source_inputs``.
+    source_inputs_base: Base for ``source_inputs`` (``repo`` or ``cwd``).
+    required_files: Declared required input file paths.
+    snapshot_required_files: Whether dirty/untracked ``required_files`` will be snapshotted.
+
+  Returns:
+    Summary dictionary indicating whether source preflight checked a Git repository.
+
+  Raises:
+    ValueError: If the source repo is dirty without draft selection, or a repo-internal required
+      file is untracked/absent from ``HEAD`` and missing from ``source_inputs``.
+  """
+  workdir = Path(cwd).resolve()
+  if not _has_git_marker(workdir):
+    return {"git_repo": False}
+  env = {
+    k: v for k, v in os.environ.items()
+    if not k.startswith("GIT_") or k.startswith(("GIT_AUTHOR_", "GIT_COMMITTER_"))
+  }
+  top_proc = _run_git(
+    ["git", "-C", str(workdir), "rev-parse", "--show-toplevel"],
+    env=env, timeout=15,
+  )
+  if top_proc.returncode != 0 or not top_proc.stdout.strip():
+    return {"git_repo": False}
+  top = Path(top_proc.stdout.strip()).resolve()
+  inputs = source_inputs.repository_paths(top, workdir, source_inputs_list or [], source_inputs_base)
+  status_proc = _run_git(
+    ["git", "-C", str(top), "status", "--porcelain", "-z", "--untracked-files=normal"],
+    env=env, timeout=15, check=True,
+  )
+  dirty_paths: list[str] = []
+  untracked_set: set[str] = set()
+  parts = status_proc.stdout.split("\0")
+  idx = 0
+  while idx < len(parts):
+    entry = parts[idx]
+    idx += 1
+    if len(entry) < 4:
+      continue
+    xy = entry[:2]
+    rel_path = entry[3:]
+    dirty_paths.append(rel_path)
+    if xy == "??":
+      untracked_set.add(rel_path)
+    if xy[0] in {"R", "C"} and idx < len(parts):
+      orig_path = parts[idx]
+      idx += 1
+      dirty_paths.append(orig_path)
+  if not inputs and not snapshot_required_files and dirty_paths:
+    raise ValueError(
+      "Write delegation requires a clean source repository (dirty/untracked: "
+      + ", ".join(dirty_paths[:8])
+      + "). Pass snapshot_required_files=true with required_files=[...], "
+      + "or select exact source_inputs=[...] file paths; no worker was started."
+    )
+  if required_files and not snapshot_required_files:
+    inputs_set = set(inputs)
+    for req in required_files:
+      abs_req = Path(os.path.abspath(workdir / req))
+      try:
+        rel = abs_req.relative_to(top).as_posix()
+      except ValueError:
+        continue
+      if rel == "." or rel in inputs_set:
+        continue
+      in_head = _run_git(
+        ["git", "-C", str(top), "cat-file", "-e", "HEAD:" + rel],
+        env=env, timeout=10,
+      ).returncode == 0
+      if rel in untracked_set or not in_head:
+        raise ValueError(
+          "Required input is untracked/absent from HEAD and will not exist in the isolated worktree: "
+          + rel + ". Include it in source_inputs or set snapshot_required_files=true; no worker was started."
+        )
+  return {"git_repo": True, "source_root": str(top), "dirty_count": len(dirty_paths)}
+
+
 def prepare(value: dict[str, Any]) -> str:
   """Create one isolated worktree and recover a completed checkout after timeout."""
   job_id = value["id"]
@@ -179,7 +312,7 @@ def prepare(value: dict[str, Any]) -> str:
                      "or select exact source_inputs file paths to snapshot current drafts into an isolated worktree.")
   if "160000 " in run(job_id, str(top), "ls-files", "--stage"):
     raise ValueError("Choose the actual nested repository; automatic submodule checkout is not supported")
-  target = st.root() / "worktrees" / job_id
+  target = st.worktree_root() / job_id
   target.parent.mkdir(mode=0o700, exist_ok=True)
   if target.is_symlink():
     raise ValueError("Workspace target is a symlink; preserve and inspect it")

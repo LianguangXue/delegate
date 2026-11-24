@@ -3,6 +3,82 @@
 This publication bundles the changes since the earlier 0.12.0 snapshot. Version
 numbers below describe implementation milestones, not separately published Git tags.
 
+## delegate 0.28.1
+
+- Install the Antigravity adapter in the config directory read by the agy CLI.
+- Only advertise `delegate_host` on MCP hosts that use conversation registration.
+- Verify the child runtime version before a hot reload, and gate new capabilities on the observed runtime.
+- Revalidate Antigravity job permissions and cancellation immediately before CLI launch.
+
+## delegate 0.28.0
+
+Full 4×4 cross-platform delegation (`antigravity`/`agy` worker provider) and zero-token Khazix-style advisory dispatch:
+
+- Added `"antigravity"` worker provider (`plugins/delegate/scripts/agy_worker.py`, `worker.py`, `storage.py`, `service.py`) executing `agy -p --output-format json --disable-slash-commands` with TTL-cached `agy models` discovery, sandbox/permission tier mapping (`read-only` plan mode, `workspace-write`/`workspace-shell`/`network-shell` sandbox + `--add-dir`, `full-access`), `--conversation` session continuation, `DELEGATE_WORKER=1` recursion guard, and opt-in `agy-advisor` (`read-only`) + `agy-builder` (`worktree`) roles (`automatic: false`).
+- Added zero-token deterministic advisory engine (`plugins/delegate/scripts/advisory.py`, `optimizer.py`, `routing_policy.py`, `dispatch_policy.py`, `service.py`, `delegate.py`) supporting `workflow` (`auto`, `dual-plan`, `frontend`, `copy-ux`, `backend-module`, `gate-review`, `bulk-cheap`, `browser-research`), `estimated_lines<=40` inline break-even gating, host-aware self-avoidance across `claude`/`codex`/`antigravity`/`dsh`, `blind_context` independent second-opinion contract + parent-draft leakage guard, and `review_gate` 2-tier `BLOCKING` vs `ADVISORY` rubric with sensitive-scope `xhigh` step-up on `gpt-6.2-sol` and a 2-round review loop circuit breaker (`max_review_rounds=2`). Contract snippets are injected ONLY when `blind_context=true` or `review_gate=true` so ordinary calls incur zero extra prompt tokens.
+- Added ultra-low-token `delegate-agent advise` and `delegate-agent ask` CLI subcommands (`plugins/delegate/scripts/cli.py`) plus comma-separated multi-profile `--dsh-profile` support in `scripts/install-hosts.py`.
+
+## delegate 0.27.0
+
+Antigravity (`antigravity` / `agy`) parent host adapter and Claude Code worker roles:
+
+- Added `"antigravity"` (with `"agy"` CLI alias) as a supported native parent host alongside `codex` and `dsh` in `hosts.py` (`NATIVE_HOSTS`, `caller_host()`, `$ANTIGRAVITY_CONVERSATION_ID` fallback), `delegate.py`, `cli.py`, `mcp_reload.py`, `service.py`, `accounting.py`, `completion.py`, `result_delivery.py`, and `persistent_tasks.py`.
+- Added [Antigravity delegate skill](hosts/antigravity/SKILL.md) and `install-hosts.py antigravity` support (registering `delegate` in `~/.gemini/config/mcp_config.json`, symlinking `~/.gemini/config/skills/delegate`, and ensuring `$HOME/.local/bin` is on `PATH` inside `~/.local/bin/delegate-agent`).
+- Added `claude-reviewer` (read-only) and `claude-builder` (isolated worktree) roles to `storage.py` (opt-in `automatic: false` in `DEFAULT_CONFIG`, enabled cleanly via `delegate_configure`) so Antigravity, Codex, and DSH can dispatch Claude Code subagents in addition to Codex and DeepSeek.
+
+## delegate 0.26.9
+
+DeepSeek Flash default routing and strict complex-only Codex Astra quota protection:
+
+- Set DeepSeek default model to `deepseek-flash` across `simple`, `standard`, and `complex` subtasks (via `optimizer.effective_tier`, `routing_policy.PREFERENCES`, provider/role `default_model` config/catalog support, and `DEFAULT_CONFIG`); `deepseek-v4-pro` is only chosen when explicitly requested or when `escalate=true` / retrying an existing `deepseek-v4-pro` `needs-work` attempt.
+- Tightened `routing_policy.assess()` `complex` floor so ordinary cross-module fixes/reviews/research with `tests`/`replay` validation stay in `standard` (`Sol` at `high` effort) rather than escalating on any single `risk="high"`, `uncertainty="high"`, or `scope="system"` signal; reserved `complex` (`Astra`) strictly for architecture, system-wide high risk/uncertainty, compound `risk="high"` + `uncertainty="high"`, or unverified `risk="high"` + `validation="inspection"`.
+- Extended `dispatch_policy.reason()` under `sol-first` to block `astra` on `trivial`/`simple`/`standard` complexity unless backed by an evidenced `sol` `needs-work` failure, and added explicit quota-protection guidance across MCP tool descriptions, `UserPromptSubmit`/`SessionStart` hooks, `SKILL.md` (Claude/Codex/DSH), and `model-playbook.md`.
+- Updated live `~/.claude/delegate/config.json` (`default_model="deepseek-flash"` on `deepseek-company` / `deepseek-official` and `model_policy.mode="sol-first"`).
+
+## delegate 0.26.8
+
+Zero-restart `/reload-plugins` and in-place MCP hot-reload:
+
+- Added `mcp_reload.py` (`HotRuntimeBridge` + `BackendClient`) to `delegate.py` (`mcp` and `host-mcp`) so long-lived MCP connections advertise `capabilities.tools.listChanged=true`, detect upgrades in `~/.claude/plugins/installed_plugins.json` or `"source": "directory"` local marketplaces (`known_marketplaces.json`), freeze and hot-swap to the upgraded backend process, preserve outer PID identity (`DELEGATE_MCP_OUTER_IDENTITY`), emit `notifications/tools/list_changed`, and gracefully drain in-flight requests before stopping superseded backends.
+- Added `"mcp-hot-reload"` capability in `service.py` and automatic version resolution in `runtime_gate.py` so updated sessions pass new launch gates immediately without restarting the conversation.
+- Updated `UserPromptSubmit` hook diagnostics to prompt a one-shot `delegate_control(action="status")` handshake refresh if `/reload-plugins --force` replaces the MCP server PID mid-session.
+
+## delegate 0.26.7
+
+Parent-controlled subagent sandbox, shared-directory write, and network/GitLab permissions:
+
+- Added `permissions="network-shell"` (enabling sandbox `networkAccess=true`, including GitLab/HTTPS/DNS from Codex and non-Codex workers) and `permissions="full-access"` (`dangerFullAccess` on Codex and unrestricted worktree/host directory access on Anthropic/DeepSeek workers), controllable directly per subtask by the parent agent.
+- Added parent-controlled `writable_roots=[...]` (extending Codex `workspaceWrite` `writableRoots`, Anthropic/DeepSeek `--add-dir`, and `input_contract` `output_files` validation to authorized shared data directories outside `cwd`) and `network_access=true|false` overrides (supporting `read-only` + `network_access=true` for network-capable Codex review/research).
+- Updated `runtime_gate.py` (`>=0.26.7` check when `writable_roots`, `network_access`, `network-shell`, or `full-access` are used), `persistent_tasks.py`, `optimizer.py`, `worker.py`, `service.py`, and `delegate.py`.
+
+## delegate 0.26.6
+
+Quota efficiency, routing accuracy, and parent-agent token reduction:
+
+- Pre-dispatch cleanliness and `required_files` contract validation (`workspaces.preflight_source`) before launching worker processes, avoiding zero-progress launch failures.
+- Zero-token capacity/infrastructure failure classification (`inference_state="not_started"`, `failure_kind="capacity"|"infrastructure"`) so pre-inference outages do not waste retry/escalation budget, plus `optimizer.work_state` loop-breaking on repeated identical errors or timeouts and `attempts.recovery_advice` (`resume` / `resume_or_split` / `fix_contract`).
+- Refined `routing_policy.assess` and `optimizer.plan` heuristics: optional `task_profile.reasoning`, automatic `high`-effort step-up for deep reasoning / replay / cross-module debugging or review, avoiding unnecessary escalation on bounded low-risk reads/reviews and high-uncertainty low-risk lookups, generation ranking ahead of legacy Codex models, and bootstrap tier/effort overhead weights.
+- Parent-context and wire overhead reductions: `hook_context_signature` and `routing_signature` deduplication on `UserPromptSubmit`/`PostToolUse`, shorter MCP `tools/list` schemas, compact `delegate_job` `list` and non-detail `result` payloads, `anti_polling_notice` hints, `worker.OUTPUT_CONTRACT`, and `permissions`/`failure_kind` propagation in `am` handoff records.
+
+## delegate 0.26.5
+
+- Problem: DeepSeek (`deepseek-company-builder` / `deepseek-official-builder`) and other Claude CLI write workers had every `Edit`/`Write` denied, and the parent agent could not choose per-subtask permission tiers (`read-only` / `workspace-write` / `workspace-shell`) directly on dispatch.
+- Root cause:
+  1. `workspaces.prepare` created worktrees under `~/.claude/delegate/worktrees/<job_id>`, matching Claude CLI's built-in `Edit(**/.claude/**)` / `Edit(~/.claude/**)` protection rules.
+  2. `worker.claude_command` hardcoded `--restricted --permission-mode dontAsk`, which denies non-preapproved file edits in `-p` mode and offered no option for `acceptEdits` or `bypassPermissions` + `Bash`.
+  3. `worker.claude_worker` ran string redaction before `json.loads(...)`, allowing integer `*TOKEN*` env vars to replace unquoted JSON numbers (such as `"contextWindow": 128000`) with `[REDACTED]`.
+- Fix:
+  - Added selectable `permissions` (`auto`, `read-only`, `workspace-write`, `workspace-shell`) on `delegate_run`, `delegate_plan`, and `delegate_loop` (`run_spec`), plus optional role-level default `permissions` in `delegate_configure`; explicit `permissions` directly overrides role defaults.
+  - Relocated default worktrees outside `.claude/` via `storage.worktree_root()` (`$XDG_DATA_HOME/claude-delegate/worktrees` or `~/.local/share/claude-delegate/worktrees` when state sits under `.claude`, overridable with `DELEGATE_WORKTREE_DIR`).
+  - Mapped `claude_command` to `dontAsk` (`Read,Glob,Grep`) for `read-only`, `--restricted --permission-mode acceptEdits` (`Read,Glob,Grep,Edit,Write`) for `workspace-write`, and `--permission-mode bypassPermissions --allow-dangerously-skip-permissions --add-dir <cwd>` (`Read,Glob,Grep,Edit,Write,Bash`) for `workspace-shell`, all with `--permission-prompts none` and recursive MCP/hook isolation intact.
+  - Updated `claude_worker` to parse JSON before structured string-only redaction, run `capabilities.local_preflight` for `workspace-shell` hardware/network declarations, and surface `permission_denials` on summaries.
+- Verification: Tested with unit suite (`tests/test_subagent_permissions.py` + `tests/`), `compileall`, `claude plugin validate`, and independent validator audit.
+
+## delegate 0.26.4
+
+- Codex host installs pass their selected `CODEX_HOME` to Delegate. Existing Codex hosts using a custom home should set `CODEX_HOME` in `[mcp_servers.delegate.env]` to that same directory.
+- Required-file sandbox probes allow 90 seconds for slow storage and 120 seconds for the RPC, subject to the job deadline. Probe timeouts are recorded before inference.
+
 ## delegate 0.26.2
 - Omitted run work_item derives a stable intent/input-contract key. Equivalent legacy
   main jobs retain dedup/retry/reuse checks without mixing unrelated historical jobs.

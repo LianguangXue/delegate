@@ -50,8 +50,18 @@ class ModelPolicyTests(unittest.TestCase):
     self.assertIn('escalate=true',json.dumps(blocked))
     allowed=optimizer.plan('s',task_profile=HARD,escalate=True)
     self.assertEqual(allowed['model'],'gpt-6-astra')
+    # sol-first blocks Astra on non-complex tasks even when escalate=True unless Sol needs-work failed.
+    non_complex_blocked=dispatch_policy.reason('gpt-6-astra',{},{},escalate=True,cfg=cfg,complexity='standard')
+    self.assertIn('strictly for complex',non_complex_blocked)
+    with patch('service.subprocess.Popen') as launch:
+      with self.assertRaisesRegex(ValueError,'strictly for complex'):
+        service.run(
+          's','codex-reviewer','gpt-6-astra','high','Review','Evidence','Casual astra',
+          self.tmp.name,escalate=True,task_profile=DAILY,
+        )
+      launch.assert_not_called()
     previous={'model':'gpt-6.1-sol','review':'needs-work','review_evidence':'Incorrect invariant','status':'completed'}
-    self.assertFalse(dispatch_policy.reason('gpt-6-astra',{}, {},previous=previous))
+    self.assertFalse(dispatch_policy.reason('gpt-6-astra',{}, {},previous=previous,complexity='standard'))
     for previous_bad in ({**previous,'status':'failed'}, {**previous,'error':'Transport error'}, {**previous,'review_evidence':''}):
       self.assertTrue(dispatch_policy.reason('gpt-6-astra',{}, {},previous=previous_bad))
     cfg['model_policy']['deny_models']=['*astra*'];st.write('config.json',cfg)

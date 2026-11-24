@@ -9,6 +9,8 @@ Use delegate_configure only for changes requested by the user. Example new role:
 ```
 
 Optional role `models`/`efforts` arrays narrow choices; omit them for per-task freedom.
+Optional role `permissions` sets a role's default tier (`read-only`/`workspace-write`/`workspace-shell`,
+matching `workspace`); explicit `permissions` on `delegate_run` overrides it per attempt.
 Providers support `codex`, `claude`, or `anthropic` (an isolated Claude CLI worker against an Anthropic-compatible API).
 DeepSeek can reference a Claude Switch Bridge account through bridge_state_dir and bridge_account, or use api_key_env.
 Use only the source explicitly chosen by the user. Keep company and official providers/roles distinct. Resolve the
@@ -24,6 +26,8 @@ If inference itself reports authentication failure, ask the user to check its Br
 do not silently substitute the other account.
 For env-only accounts, ask the user to set the named variable outside chat. Only change child environment variables;
 preserve the main Claude subscription route. API-worker histories are isolated under plugin backend-state by provider.
-No key values in config, task prompts, logs, or chat. Use api_key_env only. Claude/Anthropic read-only workers have no shell;
-Claude/Anthropic write workers have scoped Read/Glob/Grep/Edit/Write tools and report tests for the parent to execute.
+No key values in config, task prompts, logs, or chat. Use api_key_env only. Claude/Anthropic workers
+default to scoped Read/Glob/Grep under `read-only` (`dontAsk`) and scoped Read/Glob/Grep/Edit/Write
+under `workspace-write` (`acceptEdits`, reporting tests for parent); passing
+`permissions="workspace-shell"` enables `Bash` (`bypassPermissions`) inside the isolated worktree.
 Arbitrary OpenAI-compatible providers require another adapter and are not currently supported.

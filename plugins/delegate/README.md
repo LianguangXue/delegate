@@ -47,9 +47,11 @@ uses quota for coordination. DeepSeek and other Anthropic-compatible backends mu
 be configured and enabled explicitly. New provider configuration does not switch on
 delegation. Keys are provided through environment-variable references.
 
-Write tasks use detached Git worktrees, retained for inspection. Explicit source_inputs
-may overlay selected drafts; otherwise a clean source is required. Claude
-and Anthropic-compatible CLI workers use restricted file tools and have no shell.
+Write tasks use detached Git worktrees (relocated outside `.claude/`), retained for inspection.
+Explicit source_inputs may overlay selected drafts; otherwise a clean source is required.
+Parent agents can select `permissions` (`auto`, `read-only`, `workspace-write`, `workspace-shell`)
+per dispatch: Claude and Anthropic-compatible CLI workers run `dontAsk` (read-only),
+`acceptEdits` (restricted `Edit`/`Write`), or `bypassPermissions` (`Edit`/`Write`/`Bash` with `workspace-shell`).
 Jobs remain pending verification until the parent validates their result. An async completion hook can wake an open idle Claude session; a Stop hook reminds
 Claude to collect required results. Closed sessions and exited `claude -p` processes
 cannot be woken. Explicit background jobs may be detached.
@@ -113,5 +115,6 @@ Restart Claude to ensure its MCP server uses the updated routing and tool schema
 
 Version 0.9.0 supports explicit per-attempt local commits: allow_commit=true with
 commit_message/commit_paths, on a clean isolated builder worktree. Runtime performs
-the scoped commit and returns its hash, without granting API workers shell tools.
+the scoped commit and returns its hash; API workers default to file tools under
+workspace-write or can be granted Bash via permissions="workspace-shell".
 No push/merge is invoked, and a commit is not parent acceptance.

@@ -10,6 +10,7 @@ import uuid
 import storage as st
 from lifecycle import ACTIVE
 import attempts as at
+import hosts
 
 FIELDS = ("uncached_input", "cached_input", "cache_write", "output")
 READ_LIMIT = 2 * 1024 * 1024
@@ -303,7 +304,10 @@ def report(task: dict[str, Any]) -> dict[str, Any]:
     issues.append("persistent worker tasks are separately reported; this is not complete whole-goal accounting")
   by_model = {name: totals(rows) for name, rows in groups.items()}
   parent = totals([r["usage"] for r in task["requests"].values() if r["source"] == "parent"])
-  native_parent = st.session(task["session_id"]).get("host_kind") in {"codex", "dsh"} or task.get("detached_controller")
+  native_parent = (
+    st.session(task["session_id"]).get("host_kind") in hosts.NATIVE_HOSTS
+    or task.get("detached_controller")
+  )
   if native_parent:
     parent = None
   return {k: task[k] for k in ("id", "session_id", "label", "category", "complexity", "case_key", "arm",
@@ -436,7 +440,7 @@ def task_tool(session_id: str, action: str = "report", task_id: str = "", label:
     elif action == "finish":
       task.update(verdict=verdict, evidence=evidence[:4000])
       if task["status"] != "closed":
-        if state.get("host_kind") in {"codex", "dsh"} or incomplete_native:
+        if state.get("host_kind") in hosts.NATIVE_HOSTS or incomplete_native:
           task.update(status="closed", finished_at=time.time())
           if incomplete_native and state.get("host_kind", "claude") == "claude":
             # Old loaded hooks still gate on complete. Close here without falsifying usage,

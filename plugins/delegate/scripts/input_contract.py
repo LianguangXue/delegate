@@ -7,6 +7,8 @@ import re
 import stat
 import sys
 
+import capabilities
+
 
 def normalize(paths: list[str] | None, field: str) -> list[str]:
   """Accept exact file paths, without directory traversal, globbing or recursive scans."""
@@ -37,22 +39,59 @@ def discover(text: str) -> list[str]:
   return result
 
 
-def check(provider: dict[str, Any], workspace: str, cwd: str, required: list[str], outputs: list[str],
-          probe: bool = False) -> dict[str, Any]:
-  """Reject unreachable inputs and incompatible output contracts without modifying files."""
+def check(
+  provider: dict[str, Any],
+  workspace: str,
+  cwd: str,
+  required: list[str],
+  outputs: list[str],
+  probe: bool = False,
+  permissions: str | None = None,
+  writable_roots: list[str] | None = None,
+  unrestricted_fs: bool = False,
+) -> dict[str, Any]:
+  """Reject unreachable inputs and incompatible output contracts without modifying files.
+
+  Args:
+    provider: Provider metadata dictionary.
+    workspace: Effective workspace mode (``read-only`` or ``worktree``).
+    cwd: Worker execution directory.
+    required: Declared required input file paths.
+    outputs: Declared output artifact paths.
+    probe: When True, open required files briefly to verify readability.
+    permissions: Effective permission tier (shell tiers lift file-tool cwd confinement).
+    writable_roots: Additional writable directories permitted outside ``cwd``.
+    unrestricted_fs: Whether full host filesystem writes are authorized.
+
+  Returns:
+    Validation summary dictionary.
+
+  Raises:
+    ValueError: If declared inputs or output paths violate workspace rules.
+  """
   root = Path(cwd).resolve()
-  file_tools = provider["kind"] != "codex"
+  file_tools = provider["kind"] != "codex" and permissions not in {
+    "workspace-shell", "network-shell", "full-access",
+  }
   if outputs and workspace != "worktree":
-    raise ValueError("Requested output_files require a writable worktree role; a read-only reviewer must return its report as text")
+    raise ValueError(
+      "Requested output_files require a writable worktree role; "
+      "a read-only reviewer must return its report as text"
+    )
   resolved = []
   for name in required:
     if file_tools and workspace == "worktree" and Path(name).is_absolute():
-      raise ValueError("File-tool builders need cwd-relative required_files/task references for their future worktree. "
-        "Use relative paths with source_inputs for selected drafts; absolute source paths remain outside the new restricted cwd")
+      raise ValueError(
+        "File-tool builders need cwd-relative required_files/task references for their future worktree. "
+        "Use relative paths with source_inputs for selected drafts; "
+        "absolute source paths remain outside the new restricted cwd"
+      )
     path = (root / name).resolve()
     if file_tools and not path.is_relative_to(root):
-      raise ValueError("Required input is outside this file-tool role's cwd: " + str(path) +
-        ". Use a containing cwd, a relative source_inputs snapshot, or a shell-capable Codex role; no model was started")
+      raise ValueError(
+        "Required input is outside this file-tool role's cwd: " + str(path) +
+        ". Use a containing cwd, a relative source_inputs snapshot, or a shell-capable role; no model was started"
+      )
     try:
       info = path.stat()
       if not stat.S_ISREG(info.st_mode):
@@ -64,13 +103,21 @@ def check(provider: dict[str, Any], workspace: str, cwd: str, required: list[str
             raise ValueError("Required input changed file type")
           stream.read(1)
     except OSError as exc:
-      raise ValueError("Required input is unavailable: " + str(path) + " (" + type(exc).__name__ +
-        "). In a builder, include selected drafts using source_inputs or return analysis with a read-only role") from None
+      raise ValueError(
+        "Required input is unavailable: " + str(path) + " (" + type(exc).__name__ +
+        "). In a builder, include selected drafts using source_inputs or return analysis with a read-only role"
+      ) from None
     resolved.append(str(path))
+  allowed_roots = [root, *(Path(r).resolve() for r in (writable_roots or []))]
   for name in outputs:
     path = (root / name).resolve()
-    if not path.is_relative_to(root) or path == root:
-      raise ValueError("output_files must stay inside the actual worker cwd; use relative artifact paths or return report text")
+    if path == Path("/") or (
+      not unrestricted_fs and not any(path.is_relative_to(ar) and path != ar for ar in allowed_roots)
+    ):
+      raise ValueError(
+        "output_files must stay inside worker cwd or configured writable_roots "
+        "(or pass permissions='full-access'); use relative artifact paths or return report text"
+      )
     if path.exists() and not path.is_file():
       raise ValueError("output_files must name regular files or new file paths, not directories/special files")
     for parent in path.parents:
@@ -78,9 +125,16 @@ def check(provider: dict[str, Any], workspace: str, cwd: str, required: list[str
         if not parent.is_dir():
           raise ValueError("output_files parent is not a directory")
         break
-  return {"status": "passed", "required_files": resolved, "output_files": outputs,
+  return {
+    "status": "passed",
+    "required_files": resolved,
+    "output_files": outputs,
     "write_access_verified": False,
-    "scope": "Declared inputs/legacy absolute references only. Outputs checked for confinement/type, not actual writes; no permission expansion"}
+    "scope": (
+      "Declared inputs/legacy absolute references only. "
+      "Outputs checked for confinement/type, not actual writes; no permission expansion"
+    ),
+  }
 
 
 PROBE = '''import json,os,stat,sys
@@ -101,12 +155,19 @@ print(json.dumps({'files':rows}))
 
 def preflight(rpc: Any, job: dict[str, Any], sandbox_policy: dict[str, Any]) -> dict[str, Any]:
   """Check exact required files under the same Codex execution policy before any model turn."""
-  report = check(job["provider"], job["role"]["workspace"], job["cwd"], job.get("required_files", []),
-                 job.get("output_files", []))
+  execution = job.get("execution_environment") or {}
+  report = check(
+    job["provider"], job["role"]["workspace"], job["cwd"],
+    job.get("required_files", []), job.get("output_files", []),
+    permissions=job.get("permissions"),
+    writable_roots=execution.get("writable_roots"),
+    unrestricted_fs=capabilities.is_unrestricted_fs(execution) or job.get("permissions") == "full-access",
+  )
   if not report["required_files"]:
     return report
+  # GPFS may stall both opening the inputs and starting the sandbox Python process.
   response = rpc.call("command/exec", {"command": [sys.executable, "-I", "-S", "-B", "-c", PROBE,
-    json.dumps(report["required_files"])], "cwd": job["cwd"], "sandboxPolicy": sandbox_policy, "timeoutMs": 10000}, timeout=15)
+    json.dumps(report["required_files"])], "cwd": job["cwd"], "sandboxPolicy": sandbox_policy, "timeoutMs": 90000}, timeout=120)
   raw = response.get("stdout", "")
   if response.get("exitCode") != 0 or not isinstance(raw, str) or len(raw) > 65536:
     raise ValueError("Required-file sandbox preflight could not complete; no model was started")

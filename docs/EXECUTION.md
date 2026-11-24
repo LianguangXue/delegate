@@ -80,9 +80,11 @@ profiles to grant. Optional role `gpu_devices` restricts accepted declarations;
 CUDA_VISIBLE_DEVICES is still a visibility hint, **not a device cgroup**. The worker
 must not override it. Visible CUDA indices are renumbered from zero.
 
-Claude/Anthropic-compatible workers currently expose file tools only. They reject
-GPU/SSH/command-network requirements before model discovery or dispatch; requesting
-these resources does not silently switch accounts or enable another provider.
+Claude/Anthropic-compatible workers default to file tools only under `read-only`/`workspace-write`,
+where they reject GPU/SSH/command-network requirements before model discovery or dispatch.
+Passing `permissions="workspace-shell"` explicitly grants `Bash` and `bypassPermissions` inside
+the isolated worktree (and runs local capability preflight before inference); requesting
+resources alone never silently changes permissions, switches accounts, or enables another provider.
 
 ## What happens at launch
 

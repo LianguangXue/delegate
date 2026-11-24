@@ -29,6 +29,7 @@ import delivery_check
 import capabilities
 import input_contract
 import persistent_tasks
+import agy_worker
 
 ACCEPTANCE_POLICY = (
   "ACCEPTANCE INTEGRITY\n"
@@ -41,6 +42,15 @@ ACCEPTANCE_POLICY = (
   "For each item report PASS, FAIL, BLOCKED, NOT_RUN or CONFLICT with evidence/reason. "
   "Unperformed checks are NOT_RUN/BLOCKED, never PASS. Only an explicit parent revision can change "
   "acceptance; disclose that revision and revalidate against it. The parent owns acceptance."
+)
+
+OUTPUT_CONTRACT = (
+  "OUTPUT CONTRACT\n"
+  "Keep the final report concise and structured to save parent context (target <= 1200 words unless "
+  "acceptance explicitly requests a longer document): "
+  "(1) 1-line outcome + compact acceptance table (PASS/FAIL/BLOCKED/NOT_RUN/CONFLICT + command/metric evidence); "
+  "(2) changed/created relative paths with 1-line summaries (never paste entire modified files); "
+  "(3) unresolved risks, blockers, or exact next verification command."
 )
 
 
@@ -67,13 +77,88 @@ def commit_instruction(value: dict[str, Any]) -> str:
   return "Local commit is not authorized in this attempt; leave edits for the parent."
 
 
+def permission_grant(value: dict[str, Any]) -> str:
+  """Describe parent-granted overrides when permissions differ from static role defaults.
+
+  Args:
+    value: Job record dictionary.
+
+  Returns:
+    Instruction block overriding narrower role text, or empty string when unchanged.
+  """
+  configured = value.get("configured_role")
+  perms = _worker_permissions(value)
+  execution = value.get("execution_environment") or {}
+  roots = execution.get("writable_roots") or value.get("writable_roots") or []
+  net_req = execution.get("network_access_requested")
+  overridden = configured is not None and configured.get("workspace") != value["role"]["workspace"]
+  if overridden and perms == "read-only":
+    if net_req is True or execution.get("network_access"):
+      return (
+        "PERMISSION GRANT\nParent explicitly restricted this attempt to permissions=read-only "
+        "with networkAccess=True; return report text without file edits."
+      )
+    return (
+      "PERMISSION GRANT\nParent explicitly restricted this attempt to permissions=read-only; "
+      "do not attempt edits or shell commands even if ROLE mentions editing."
+    )
+  if (
+    overridden
+    or perms in {"network-shell", "full-access"}
+    or (value["provider"].get("kind", "codex") != "codex" and perms == "workspace-shell")
+    or roots
+    or net_req is True
+  ):
+    extras = []
+    if roots:
+      extras.append("writable_roots=" + json.dumps(roots))
+    if execution.get("network_access") or net_req is True:
+      extras.append("networkAccess=True")
+    detail = (" (" + ", ".join(extras) + ")") if extras else ""
+    return (
+      "PERMISSION GRANT\nParent explicitly granted permissions="
+      + perms
+      + detail
+      + " for this attempt; this overrides any narrower read-only, file-tools-only, "
+      + "or cwd-confined wording in ROLE above."
+    )
+  return ""
+
+
+def _worker_permissions(value: dict[str, Any]) -> str:
+  """Return the effective subagent permission tier for an existing or new job.
+
+  Args:
+    value: Job record dictionary.
+
+  Returns:
+    One of ``read-only``, ``workspace-write``, ``workspace-shell``, ``network-shell``, or ``full-access``.
+
+  Raises:
+    ValueError: If a non-empty permission field holds an unrecognized or unresolved value.
+  """
+  raw = (value.get("execution_environment") or {}).get("permissions") or value.get("permissions")
+  if raw is not None and raw != "auto":
+    if raw not in capabilities.PERMISSIONS:
+      raise ValueError("Unsupported worker permissions: " + str(raw))
+    return raw
+  if value["role"]["workspace"] == "read-only":
+    return "read-only"
+  return "workspace-shell" if value["provider"].get("kind", "codex") == "codex" else "workspace-write"
+
+
 def packet(value: dict[str, Any]) -> str:
   """Carry explicit context and ancestor instruction files into every backend."""
+  grant = permission_grant(value)
   if value.get("resume_job"):
-    return "\n\n".join([environment_brief(value), ACCEPTANCE_POLICY, "Continue the prior role and constraints in the same workspace. "
+    parts = [environment_brief(value), ACCEPTANCE_POLICY, OUTPUT_CONTRACT]
+    if grant:
+      parts.append(grant)
+    parts.extend(["Continue the prior role and constraints in the same workspace. "
       "Read any project instructions changed since the previous turn. Do not spawn other agents.",
       ("COMMIT AUTHORIZATION\n" + commit_instruction(value)),
       "FOLLOW-UP\n" + value["task"], "ACCEPTANCE\n" + value["acceptance"], "NEW CONTEXT\n" + value["context"]])
+    return "\n\n".join(parts)
   instruction_parts = []
   seen_instructions = set()
   source = Path(value["source_cwd"])
@@ -100,9 +185,10 @@ def packet(value: dict[str, Any]) -> str:
           "It is referenced instead of inlined due to size. If you cannot read it, report blocked.")
       else:
         instruction_parts.append(str(path) + "\n" + text)
-  return "\n\n".join([
+  sections = [
     environment_brief(value),
     ACCEPTANCE_POLICY,
+    OUTPUT_CONTRACT,
     "You are a delegated worker. Complete only this task. Do not spawn more agents. "
     "Do not push, merge, send messages, change credentials/configuration, or delete user files. "
     + commit_instruction(value) + " "
@@ -112,10 +198,15 @@ def packet(value: dict[str, Any]) -> str:
     "Keep required helpers in reviewed source/test paths or explicitly report the missing delivery dependency. "
     "If permissions prevent a check, report the limitation; do not bypass permissions.",
     "ROLE\n" + value["role"]["instructions"],
+  ]
+  if grant:
+    sections.append(grant)
+  sections.extend([
     "INHERITED PROJECT INSTRUCTIONS\n" + "\n\n".join(instruction_parts),
     "TASK\n" + value["task"], "ACCEPTANCE\n" + value["acceptance"],
     "CONTEXT\n" + value["context"],
   ])
+  return "\n\n".join(sections)
 
 
 def environment_brief(value: dict[str, Any]) -> str:
@@ -130,16 +221,50 @@ def environment_brief(value: dict[str, Any]) -> str:
       "output_files": value.get("output_files", [])}) +
       ". Relative paths refer to this worker's actual cwd and selected draft copies. Use these input paths; "
       "original source paths are not a writable target. Preserve the original acceptance and report conflicts.\n")
+  roots = (value.get("execution_environment") or {}).get("writable_roots") or value.get("writable_roots") or []
+  if roots:
+    inputs += (
+      "WRITABLE SHARED ROOTS: "
+      + json.dumps(roots)
+      + ". Parent explicitly authorized writes inside these directories outside cwd.\n"
+    )
   if value["provider"].get("kind", "codex") != "codex":
-    return inputs + "RUNTIME: scoped file tools only; no shell, SSH, database access or live steering. Report blocked checks."
+    perms = _worker_permissions(value)
+    if perms == "read-only":
+      return (inputs + "RUNTIME: permissions=read-only; scoped read/search file tools only (Read, Glob, Grep); "
+        "no file edits, shell, SSH, database access or live steering. Return findings as report text.")
+    if perms == "workspace-write":
+      return (inputs + "RUNTIME: permissions=workspace-write (isolated Git worktree, permission_mode=acceptEdits); "
+        "file tools Read, Glob, Grep, Edit, Write are enabled and auto-accepted inside cwd=" + str(value["cwd"])
+        + "; no shell or live steering. Apply edits directly with Edit/Write and report checks for the parent to run.")
+    if perms in {"workspace-shell", "network-shell", "full-access"}:
+      scope_note = (
+        "full host filesystem and network access enabled"
+        if perms == "full-access"
+        else "Read, Glob, Grep, Edit, Write and Bash shell tools enabled (with network and declared writable_roots)"
+        if perms == "network-shell"
+        else "Read, Glob, Grep, Edit, Write and Bash shell tools are enabled inside cwd=" + str(value["cwd"])
+      )
+      return (
+        inputs
+        + "RUNTIME: permissions="
+        + perms
+        + " (isolated Git worktree, permission_mode=bypassPermissions); "
+        + scope_note
+        + "; no live steering. Apply edits in this worktree and run focused validation commands within task "
+        + "constraints; never push or merge unless explicitly authorized."
+      )
+    raise ValueError("Unsupported worker permissions: " + str(perms))
   execution = capabilities.from_job(value)
   waiting = ("Use delegate_wait(path=completion_file) or delegate_wait(pid=owned_pid) instead of repeated short polling/model rounds. "
     "The wait itself uses no inference; process exit/file existence still requires result validation. "
     if value.get("worker_wait_supported", not bool(value.get("thread_id"))) else
     "This legacy resumed thread has no delegate_wait tool; ask the parent to supervise long waits rather than repeatedly polling. ")
+  roots_note = "; writableRoots=" + json.dumps(execution["writable_roots"]) if execution.get("writable_roots") else ""
   return (inputs + "RUNTIME: approval=never; execution profile=" + execution["profile"] +
     "; sandbox_mode=" + str(execution["sandbox_mode"]) + "; networkAccess=" + str(execution["network_access"]) +
-    "; filesystem isolation=" + str(execution["filesystem_isolation"]) + "; requirements_declared=" + str(execution["declared"]) + ". Requirements=" +
+    "; filesystem isolation=" + str(execution["filesystem_isolation"]) + roots_note +
+    "; requirements_declared=" + str(execution["declared"]) + ". Requirements=" +
     json.dumps(execution["requirements"]) + ". GPU devices must already be allocated; CUDA_VISIBLE_DEVICES is a hint, "
     "not a lease/device cgroup. Do not override it or use undeclared GPUs. Visible CUDA device IDs are renumbered from 0. "
     "Declared resources are checked before inference; absent declarations mean availability is unknown. "
@@ -205,6 +330,9 @@ def codex_worker(value: dict[str, Any], prompt: str) -> dict[str, Any]:
       st.update_job(job_id, phase="file-access-preflight", input_access={"status": "pending", "inference_calls": 0})
       try:
         report = input_contract.preflight(rpc, value, capabilities.policy(value))
+      except TimeoutError as exc:
+        st.update_job(job_id, input_access={"status": "blocked", "error": str(exc), "inference_calls": 0})
+        raise
       except (ValueError, RuntimeError) as exc:
         st.update_job(job_id, input_access={"status": "blocked", "error": str(exc), "inference_calls": 0})
         return {"status": "failed", "error": str(exc)}
@@ -359,6 +487,11 @@ def codex_worker(value: dict[str, Any], prompt: str) -> dict[str, Any]:
             "reason": "Model temporarily at capacity; retry after cooldown or explicitly select another model",
             "source": "provider inference response"})
         outcome = {"status": status, "result": "\n\n".join(final_messages.values()), "error": turn.get("error")}
+        if status == "failed" and not at.positive_usage(st.job(job_id)) and isinstance(turn.get("error"), dict):
+          err_info = str(turn["error"].get("codexErrorInfo") or "")
+          err_msg = str(turn["error"].get("message") or "").lower()
+          if err_info in {"serverOverloaded", "usageLimitReached"} or "at capacity" in err_msg:
+            outcome.update(inference_state="not_started", failure_kind="capacity")
         break
     st.update_job(job_id, execution_finished_at=time.time(), phase="collecting-result")
     rpc.deadline = None  # Post-turn metadata uses its own bounded timeout.
@@ -370,6 +503,20 @@ def codex_worker(value: dict[str, Any], prompt: str) -> dict[str, Any]:
     except Exception:
       pass
   return outcome
+
+
+def _redact_structured(data: Any, env: dict[str, str], secret_values: list[str]) -> Any:
+  """Redact credentials inside parsed JSON structures without corrupting non-string scalars."""
+  if isinstance(data, str):
+    return diagnostics.redact(credentials.redact(data, env), secret_values)
+  if isinstance(data, list):
+    return [_redact_structured(item, env, secret_values) for item in data]
+  if isinstance(data, dict):
+    return {
+      diagnostics.redact(credentials.redact(str(k), env), secret_values): _redact_structured(v, env, secret_values)
+      for k, v in data.items()
+    }
+  return data
 
 
 def claude_command(value: dict[str, Any]) -> tuple[list[str], dict[str, str]]:
@@ -388,11 +535,38 @@ def claude_command(value: dict[str, Any]) -> tuple[list[str], dict[str, str]]:
     if not value.get("resume_job") or value.get("backend_config_dir"):
       env["CLAUDE_CONFIG_DIR"] = value.get("backend_config_dir") or str(
         st.root() / "backend-state" / st.key(value.get("provider_name", provider.get("bridge_account", "anthropic"))))
-  tools = "Read,Glob,Grep"
-  if value["role"]["workspace"] == "worktree":
-    tools += ",Edit,Write"
+  perms = _worker_permissions(value)
+  execution = value.get("execution_environment") or {}
+  roots = execution.get("writable_roots") or value.get("writable_roots") or []
+  if perms in {"workspace-shell", "network-shell", "full-access"}:
+    env.update(capabilities.environment(value))
+  if perms == "read-only":
+    tools = "Read,Glob,Grep"
+    mode_flags = ["--restricted", "--permission-mode", "dontAsk", "--permission-prompts", "none"]
+  elif perms == "workspace-write":
+    tools = "Read,Glob,Grep,Edit,Write"
+    dir_flags = []
+    for d in dict.fromkeys(roots):
+      dir_flags.extend(["--add-dir", d])
+    mode_flags = ["--restricted", "--permission-mode", "acceptEdits", "--permission-prompts", "none", *dir_flags]
+  elif perms in {"workspace-shell", "network-shell", "full-access"}:
+    tools = "Read,Glob,Grep,Edit,Write,Bash"
+    extra_dirs = [str(Path(value.get("cwd") or ".").resolve()), *roots]
+    if perms == "full-access" and value.get("source_cwd"):
+      extra_dirs.append(str(Path(value["source_cwd"]).resolve()))
+    dir_flags: list[str] = []
+    for d in dict.fromkeys(extra_dirs):
+      dir_flags.extend(["--add-dir", d])
+    mode_flags = [
+      "--permission-mode", "bypassPermissions",
+      "--allow-dangerously-skip-permissions",
+      "--permission-prompts", "none",
+      *dir_flags,
+    ]
+  else:
+    raise ValueError("Unsupported worker permissions: " + str(perms))
   command = [provider["command"], "-p", "--output-format", "json", "--model", value["model"],
-             "--effort", value["effort"], "--restricted", "--permission-mode", "dontAsk",
+             "--effort", value["effort"], *mode_flags,
              "--tools", tools, "--allowedTools", tools, "--strict-mcp-config",
              "--mcp-config", '{"mcpServers":{}}', "--settings", '{"disableAllHooks":true}']
   if value.get("thread_id"):
@@ -403,15 +577,30 @@ def claude_command(value: dict[str, Any]) -> tuple[list[str], dict[str, str]]:
 
 
 def claude_worker(value: dict[str, Any], prompt: str) -> dict[str, Any]:
-  """Execute a bounded file-tool worker; retain its session ID for follow-up."""
+  """Execute a bounded Claude/Anthropic CLI worker; retain its session ID for follow-up."""
   job_id = value["id"]
+  perms = _worker_permissions(value)
+  execution = value.get("execution_environment") or {}
+  roots = execution.get("writable_roots") or value.get("writable_roots") or []
   try:
-    report = input_contract.check(value["provider"], value["role"]["workspace"], value["cwd"],
-      value.get("required_files", []), value.get("output_files", []), probe=True)
+    report = input_contract.check(
+      value["provider"], value["role"]["workspace"], value["cwd"],
+      value.get("required_files", []), value.get("output_files", []),
+      probe=True, permissions=perms, writable_roots=roots,
+      unrestricted_fs=(capabilities.is_unrestricted_fs(execution) or perms == "full-access"),
+    )
   except ValueError as exc:
     st.update_job(job_id, input_access={"status": "blocked", "error": str(exc), "inference_calls": 0})
     return {"status": "failed", "error": str(exc)}
   st.update_job(job_id, input_access=report)
+  execution = value.get("execution_environment") or {}
+  if execution.get("preflight", {}).get("status") == "pending":
+    st.update_job(job_id, phase="capability-preflight")
+    execution = {**execution, "preflight": capabilities.local_preflight(value)}
+    st.update_job(job_id, execution_environment=execution)
+    if execution["preflight"]["status"] != "passed":
+      return {"status": "failed",
+              "error": execution["preflight"].get("reason", "Required capability preflight did not pass")}
   import cli_history
   cli_history.restore(value)
   command, env = claude_command(value)
@@ -453,24 +642,36 @@ def claude_worker(value: dict[str, Any], prompt: str) -> dict[str, Any]:
       st.update_job(job_id, execution_finished_at=time.time(), phase="collecting-result")
       output.flush()
       output.seek(0)
-      raw = diagnostics.redact(credentials.redact(output.read(), env), secret_values)
+      raw_output = output.read()
       try:
-        result = credentials.redact_data(json.loads(raw), env)
+        result = _redact_structured(json.loads(raw_output), env, secret_values)
       except ValueError:
         error.seek(0)
-        raise RuntimeError("Worker failed: " + diagnostics.redact(credentials.redact(error.read() + raw, env), secret_values)[-4000:])
-      if isinstance(result.get("result"), str):
-        result["result"] = diagnostics.redact(result["result"], secret_values)
+        combined = diagnostics.redact(credentials.redact(error.read() + raw_output, env), secret_values)
+        raise RuntimeError("Worker failed: " + combined[-4000:])
+      if not isinstance(result, dict):
+        raise RuntimeError("Worker failed: unexpected JSON output shape")
       if result.get("api_error") == "usage_limit_reached":
         quota_name = "claude-quota.json" if value["provider"]["kind"] == "claude" else "quota-" + st.key(value["provider_name"]) + ".json"
         st.write(quota_name, {"status": "limited", "observed_at": time.time(), "model": value["model"],
                              "source": "provider inference response", "reason": result.get("result"),
                              "data": {"api_error": "usage_limit_reached"}})
-      return {"status": "failed" if result.get("is_error") or proc.returncode else "completed",
-              "result": result.get("result", ""), "usage": result.get("usage"),
-              "model_usage": result.get("modelUsage"),
-              "error": result.get("api_error"),
-              "estimated_cost_usd": result.get("total_cost_usd"), "thread_id": result.get("session_id", thread_id)}
+      failed = bool(result.get("is_error") or proc.returncode)
+      outcome: dict[str, Any] = {
+        "status": "failed" if failed else "completed",
+        "result": result.get("result", ""), "usage": result.get("usage"),
+        "model_usage": result.get("modelUsage"),
+        "error": result.get("api_error"),
+        "estimated_cost_usd": result.get("total_cost_usd"), "thread_id": result.get("session_id", thread_id),
+      }
+      if failed and not at.positive_usage({"usage": result.get("usage")}):
+        outcome["inference_state"] = "not_started"
+        outcome["failure_kind"] = (
+          "capacity" if result.get("api_error") == "usage_limit_reached" else "infrastructure"
+        )
+      if result.get("permission_denials"):
+        outcome["permission_denials"] = result["permission_denials"]
+      return outcome
     finally:
       try:
         stop_owned(proc, process_identity)
@@ -479,10 +680,68 @@ def claude_worker(value: dict[str, Any], prompt: str) -> dict[str, Any]:
           stream.seek(0)
           raw = stream.read()
           try:
-            safe = json.dumps(credentials.redact_data(json.loads(raw), env), ensure_ascii=False)
+            safe = json.dumps(_redact_structured(json.loads(raw), env, secret_values), ensure_ascii=False)
           except ValueError:
-            safe = credentials.redact(raw, env)
-          path.write_text(diagnostics.redact(safe, secret_values))
+            safe = diagnostics.redact(credentials.redact(raw, env), secret_values)
+          path.write_text(safe)
+
+
+def antigravity_worker(value: dict[str, Any], prompt: str) -> dict[str, Any]:
+  """Execute a bounded Antigravity (agy) CLI worker and retain its conversation ID.
+
+  Args:
+    value: Persisted job record dictionary.
+    prompt: Complete worker task packet text.
+
+  Returns:
+    Terminal job outcome dictionary for ``worker.main``.
+  """
+  job_id = value["id"]
+  perms = _worker_permissions(value)
+  execution = value.get("execution_environment") or {}
+  roots = execution.get("writable_roots") or value.get("writable_roots") or []
+  try:
+    report = input_contract.check(
+      value["provider"], value["role"]["workspace"], value["cwd"],
+      value.get("required_files", []), value.get("output_files", []),
+      probe=True, permissions=perms, writable_roots=roots,
+      unrestricted_fs=(capabilities.is_unrestricted_fs(execution) or perms == "full-access"),
+    )
+  except ValueError as exc:
+    st.update_job(job_id, input_access={"status": "blocked", "error": str(exc), "inference_calls": 0})
+    return {"status": "failed", "error": str(exc)}
+  st.update_job(job_id, input_access=report)
+  if execution.get("preflight", {}).get("status") == "pending":
+    st.update_job(job_id, phase="capability-preflight")
+    execution = {**execution, "preflight": capabilities.local_preflight(value)}
+    st.update_job(job_id, execution_environment=execution)
+    if execution["preflight"]["status"] != "passed":
+      return {
+        "status": "failed",
+        "error": execution["preflight"].get("reason", "Required capability preflight did not pass"),
+      }
+  def before_spawn() -> None:
+    current = st.job(job_id)
+    if current.get("cancel_requested"):
+      raise InterruptedError("Antigravity worker cancelled before launch")
+    persistent_tasks.check_child_launch(current)
+    dispatch_policy.check_job(current)
+    capabilities.validate_grant(current)
+
+  agy_job = {**value, "prompt": prompt}
+  result = agy_worker.run_agy(agy_job, value["role"], value["provider"], before_spawn=before_spawn)
+  cli_sid = result.get("cli_session")
+  outcome: dict[str, Any] = {
+    "status": "completed",
+    "result": result.get("result", ""),
+    "usage": result.get("usage") or None,
+    "model_usage": result.get("model_usage") or None,
+    "cli_session": cli_sid,
+    "thread_id": cli_sid or value.get("thread_id"),
+  }
+  if result.get("permission_denials"):
+    outcome["permission_denials"] = result["permission_denials"]
+  return outcome
 
 
 def main(job_id: str) -> None:
@@ -513,6 +772,8 @@ def main(job_id: str) -> None:
     prompt = packet(value)
     if value["provider"]["kind"] == "codex":
       outcome = codex_worker(value, prompt)
+    elif value["provider"]["kind"] == "antigravity":
+      outcome = antigravity_worker(value, prompt)
     else:
       outcome = claude_worker(value, prompt)
   except InterruptedError as exc:
@@ -542,7 +803,13 @@ def main(job_id: str) -> None:
       st.update_job(job_id, phase="capability-preflight-blocked")
       current = st.job(job_id)
     if outcome.get("status") in {"failed", "timed_out"}:
-      st.update_job(job_id, failure_kind="model_or_transport" if at.model_attempted(current) else "infrastructure")
+      if outcome.get("inference_state") == "not_started":
+        st.update_job(job_id, inference_state="not_started")
+        current = st.job(job_id)
+      failure_kind = outcome.get("failure_kind") or (
+        "model_or_transport" if at.model_attempted(current) else "infrastructure"
+      )
+      st.update_job(job_id, failure_kind=failure_kind)
     if not runtime_verified:
       # A legacy parent can copy a previous thread ID into a new receipt. Never
       # archive it or start cleanup backends when this worker rejected provenance.
@@ -555,7 +822,9 @@ def main(job_id: str) -> None:
     elif has_active_group(current):
       st.update_job(job_id, status="orphaned", error="Backend cleanup is unconfirmed; inspect before resuming")
     else:
-      if current.get("thread_id") and (current.get("execution_environment") or {}).get("preflight", {}).get("status") != "blocked":
+      if (current.get("thread_id")
+          and current["provider"].get("kind") != "antigravity"
+          and (current.get("execution_environment") or {}).get("preflight", {}).get("status") != "blocked"):
         st.update_job(job_id, status="archiving")
         try:
           thread_cleanup.archive(job_id, finishing=True)

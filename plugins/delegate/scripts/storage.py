@@ -24,11 +24,40 @@ DEFAULT_CONFIG = {
                "models": ["haiku", "sonnet", "opus"], "efforts": ["low", "medium", "high"]},
     "deepseek": {"kind": "anthropic", "enabled": False, "command": "claude",
                  "base_url": "https://api.deepseek.com/anthropic", "api_key_env": "DEEPSEEK_API_KEY",
-                 "models": [], "efforts": ["low", "medium", "high"]},
+                 "default_model": "deepseek-flash", "models": [], "efforts": ["low", "medium", "high"]},
+    "antigravity": {
+      "kind": "antigravity", "enabled": True, "command": "agy",
+      "models": [], "efforts": ["low", "medium", "high", "xhigh", "max"],
+    },
   },
   "agents": {
     "claude-explorer": {"provider": "claude", "enabled": True, "automatic": True,
                         "workspace": "read-only", "instructions": "Explore and explain the relevant code."},
+    "claude-reviewer": {
+      "provider": "claude", "enabled": True, "automatic": False, "workspace": "read-only",
+      "instructions": "Review independently. Report actionable defects with concrete file/line evidence.",
+    },
+    "claude-builder": {
+      "provider": "claude", "enabled": True, "automatic": False, "workspace": "worktree",
+      "instructions": (
+        "Implement the smallest complete change in the isolated worktree; "
+        "run focused checks when shell permissions are granted."
+      ),
+    },
+    "agy-advisor": {
+      "provider": "antigravity", "enabled": True, "automatic": False, "workspace": "read-only",
+      "instructions": (
+        "Provide an independent architecture second opinion or natural UX/copy review "
+        "grounded in verified code facts; mark unverified guesses [speculative]."
+      ),
+    },
+    "agy-builder": {
+      "provider": "antigravity", "enabled": True, "automatic": False, "workspace": "worktree",
+      "instructions": (
+        "Implement the smallest complete change in the isolated worktree; "
+        "run focused checks when shell permissions are granted."
+      ),
+    },
     "codex-builder": {"provider": "codex", "enabled": True, "automatic": True,
                       "workspace": "worktree", "instructions": "Implement the smallest complete change; run focused tests."},
     "codex-reviewer": {"provider": "codex", "enabled": True, "automatic": True,
@@ -42,6 +71,26 @@ DEFAULT_CONFIG = {
 def root() -> Path:
   """Return the private state directory, overridable for isolated tests."""
   path = Path(os.environ.get("DELEGATE_STATE_DIR", str(Path.home() / ".claude" / "delegate")))
+  path.mkdir(mode=0o700, parents=True, exist_ok=True)
+  return path.resolve()
+
+
+def worktree_root() -> Path:
+  """Return the isolated worktree base outside ``.claude/`` when state lives under ``.claude``.
+
+  Returns:
+    Resolved directory path for detached delegate job worktrees.
+  """
+  override = os.environ.get("DELEGATE_WORKTREE_DIR")
+  if override:
+    path = Path(override)
+  else:
+    state = root()
+    if ".claude" in state.parts:
+      base = Path(os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share"))
+      path = base / "claude-delegate" / "worktrees"
+    else:
+      path = state / "worktrees"
   path.mkdir(mode=0o700, parents=True, exist_ok=True)
   return path.resolve()
 
